@@ -1,4 +1,9 @@
 // WitAnime provider for Nuvio (QuickJS: no DOM, no Node APIs).
+// Confirmed site flow (Nov 2026):
+//   GET  /watch/{slug}/{ep}              -> csrf-token meta + session cookie
+//   POST /watch/{slug}/{ep}/sources      -> { players: { FHD|HD|SD: [ {token,label,version,lang} ] } }
+//   POST /watch/stream-source/{token}    -> opens the gate (JSON with sandbox/referrerPolicy)
+//   GET  /watch/stream-gate/{token}      -> 302 to the host embed (no Referer, like the site's iframe)
 
 const BASE = "https://witanime.site";
 const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
@@ -12,12 +17,13 @@ const CH = {
 };
 const LANG = "ar,en-US;q=0.9,en;q=0.8";
 
-const MAX_GATES = 5;
+const MAX_GATES = 5;          // gates opened per request (site limit: 20/min)
 const GATE_DELAY_MS = 400;
 const FETCH_TIMEOUT_MS = 25000;
 
-// Watch hosts expanded with servers seen on WitAnime watch page
-const SUPPORTED = ["mp4upload", "yourupload", "yonaplay", "videa"];
+// Watch streams: Mp4upload is resolvable directly via embed/packed extraction.
+const SUPPORTED = ["mp4upload"];
+// Downloads: Mp4upload and Mediafire (filtered to exclude archives like .zip/.rar).
 const DL_SUPPORTED = ["mp4upload", "mediafire"];
 const TAB_H = { FHD: 1080, HD: 720, SD: 480 };
 
@@ -66,6 +72,7 @@ function jarUpdate(res) {
   } catch (e) {}
 }
 
+// fetch with retries on network errors only (never on HTTP status). Cookies are sent ONLY to witanime.
 async function fx(url, opts, tries, timeoutMs) {
   tries = tries || 3;
   const ms = timeoutMs || FETCH_TIMEOUT_MS;
@@ -148,17 +155,6 @@ function isPlayableMediaUrl(u) {
   if (!/^https?:\/\//i.test(s)) return false;
   if (/\.(zip|rar|7z|tar|gz|exe|apk|srt|vtt|ass)(?:[?#]|$)/i.test(s)) return false;
   return true;
-}
-
-function formatHostName(label) {
-  const map = {
-    mp4upload: "Mp4upload",
-    yourupload: "YourUpload",
-    yonaplay: "YonaPlay",
-    videa: "Videa",
-    mediafire: "Mediafire",
-  };
-  return map[label] || (label ? label.charAt(0).toUpperCase() + label.slice(1) : "Server");
 }
 
 function unpackOne(src, m) {
@@ -665,7 +661,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
           res = await resolveEmbed(eu, ["", BASE + "/"], DEBUG ? "wit_" + t.label + "_" + t.tab + (t.dl ? "_dl" : "") + ".html" : "");
         }
         DIAG.push(t.label + " " + res.info + " links:" + res.links.length);
-        const host = formatHostName(t.label);
+        const host = t.label === "mp4upload" ? "Mp4upload" : "Mediafire";
         res.links.forEach((l) => {
           if (!isPlayableMediaUrl(l.url)) return;
           streams.push({
