@@ -172,6 +172,8 @@ async function expandHls(masterUrl, hdrs) {
   return out;
 }
 
+const DIAG = [];
+
 async function fetchJsonSafe(u, h) {
   try {
     const r = await fetch(u, { headers: h });
@@ -181,23 +183,15 @@ async function fetchJsonSafe(u, h) {
   } catch (e) { return null; }
 }
 
-async function resolveDailymotion(url, pageUrl) {
-  const id = (/[?&]video=([^&]+)/.exec(url) || /\/video\/([^?_\/]+)/.exec(url) || [])[1];
-  if (!id) return [];
-  const ref = pageUrl || BASE + "/";
-  const H = Object.assign({}, UA, { Referer: ref, Origin: BASE });
-  const plain = `https://www.dailymotion.com/player/metadata/video/${id}`;
+function randHex(n) {
+  let s = "";
+  while (s.length < n) s += Math.floor(Math.random() * 16).toString(16);
+  return s.toUpperCase();
+}
 
-  // Try the "embedded player" style request first, then fall back to the
-  // plain request that is known to work.
-  let j = await fetchJsonSafe(`${plain}?embedder=${encodeURIComponent(ref)}`, H);
-  if (!j) j = await fetchJsonSafe(plain, H);
-  if (!j) j = await fetchJsonSafe(plain, UA);
-  if (!j) return [];
-  const q = j.qualities;
-
-  const out = [];
-  const seenH = {};
+// Build the list of playable links from one metadata response.
+async function linksFromMeta(j, H) {
+  const q = j.qualities, out = [], seenH = {};
   try {
     Object.keys(q).forEach((k) => {
       if (!/^\d+$/.test(k)) return;
@@ -210,16 +204,54 @@ async function resolveDailymotion(url, pageUrl) {
       });
     });
   } catch (e) {}
-
   const auto = q.auto && q.auto[0];
   if (auto && auto.url) {
-    let hls = await expandHls(auto.url, H);
-    if (hls.length === 1 && !hls[0].height) hls = await expandHls(auto.url, UA);
+    const hls = await expandHls(auto.url, H);
     hls.forEach((l) => { if (l.master || !seenH[l.height]) out.push(l); });
   }
-  const heights = out.filter((o) => o.height).map((o) => o.height).sort((x, y) => x - y);
-  out.forEach((o) => { o.info = "found: " + (heights.join(",") || "auto only"); });
   return out;
+}
+
+const maxH = (links) => links.reduce((m, l) => Math.max(m, l.height || 0), 0);
+
+async function resolveDailymotion(url, pageUrl) {
+  const id = (/[?&]video=([^&]+)/.exec(url) || /\/video\/([^?_\/]+)/.exec(url) || [])[1];
+  if (!id) return [];
+  const playerId = (/\/player\/(\w+)\.html/.exec(url) || [])[1];
+  const ref = pageUrl || BASE + "/";
+  const v1 = randHex(32), ts = String(Math.floor(Math.random() * 90000) + 10000);
+  const H = Object.assign({}, UA, { Referer: ref, Origin: BASE, Cookie: "v1st=" + v1 + "; ts=" + ts });
+  const plain = `https://www.dailymotion.com/player/metadata/video/${id}`;
+
+  // Same parameters the official embedded player sends. The player id and
+  // the dmV1st/dmTs pair decide which qualities the server hands back.
+  const full = plain + "?" + [
+    "embedder=" + encodeURIComponent(ref),
+    "geo=1",
+    playerId ? "player-id=" + playerId : "",
+    "locale=en-US",
+    "dmV1st=" + v1,
+    "dmTs=" + ts,
+    "is_native_app=0",
+  ].filter(Boolean).join("&");
+
+  const attempts = [
+    { name: "full", url: full, h: H },
+    { name: "embedder", url: `${plain}?embedder=${encodeURIComponent(ref)}`, h: H },
+    { name: "plain", url: plain, h: UA },
+  ];
+  let best = [], bestName = "";
+  for (const at of attempts) {
+    const j = await fetchJsonSafe(at.url, at.h);
+    if (!j) { DIAG.push(at.name + ":fail"); continue; }
+    const links = await linksFromMeta(j, at.h);
+    const hs = links.map((l) => l.height).filter(Boolean).sort((x, y) => x - y);
+    DIAG.push(at.name + ":" + (hs.join("/") || "auto"));
+    if (maxH(links) > maxH(best) || (!best.length && links.length)) { best = links; bestName = at.name; }
+    if (maxH(best) >= 2000) break;
+  }
+  best.forEach((o) => { o.info = bestName; });
+  return best;
 }
 
 async function resolve(embed, pageUrl) {
@@ -232,6 +264,7 @@ async function resolve(embed, pageUrl) {
 // ---------- entry point ----------
 async function getStreams(tmdbId, mediaType, season, episode) {
   const dbg = [];
+  DIAG.length = 0;
   const fail = (m) => [{ name: "DonghuaWorld DEBUG", title: dbg.concat(m).join(" > "), url: "https://debug.invalid/", quality: "debug" }];
   try {
     const titles = await getTitles(tmdbId, mediaType);
@@ -265,7 +298,9 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         })
       );
     }
-    return streams.length ? streams : fail("no playable streams");
+    if (!streams.length) return fail("no playable streams " + DIAG.join(" | "));
+    streams.push({ name: "DonghuaWorld INFO", title: "diag " + DIAG.join(" | "), url: "https://debug.invalid/", quality: "info" });
+    return streams;
   } catch (err) {
     return fail("ERROR " + (err && err.message));
   }
