@@ -24,50 +24,30 @@ const LANG = "ar,en-US;q=0.9,en;q=0.8";
 
 const MAX_GATES = 5;          // gates opened per request (site limit: 20/min)
 const GATE_DELAY_MS = 700;
+const FETCH_TIMEOUT_MS = 25000;
+// Hosts we can turn into a playable link, in priority order.
+// Streams: only Mp4upload is resolvable (HGCloud's page is an obfuscated JS loader we do not run).
 const SUPPORTED = ["mp4upload"];
+// FHD (1080p) is only offered through the site's "downloads" list.
 const DL_SUPPORTED = ["mp4upload", "mediafire"];
 const TAB_H = { FHD: 1080, HD: 720, SD: 480 };
 
-const DEBUG = (function () {
-  try {
-    if (typeof globalThis !== "undefined" && globalThis.WITANIME_DEBUG) return true;
-    return typeof process !== "undefined" && process.env && !!process.env.WITANIME_DEBUG;
-  } catch (e) {
-    return false;
-  }
-})();
+const DEBUG = (function () { try { return typeof process !== "undefined" && process.env && !!process.env.WITANIME_DEBUG; } catch (e) { return false; } })();
 const DIAG = [];
+const sleep = (ms) => new Promise((r) => (typeof setTimeout === "function" ? setTimeout(r, ms) : r()));
 
-function sleep(ms) {
-  return new Promise((resolve) => {
-    if (typeof setTimeout === "function") setTimeout(resolve, ms);
-    else resolve();
-  });
-}
-
-function fetchWithTimeout(url, opts, timeoutMs) {
-  const ms = timeoutMs || 10000;
-  let controller = null;
-  let timer = null;
+function getTimeoutSignal(ms) {
   try {
-    if (typeof AbortController !== "undefined") {
-      controller = new AbortController();
-      if (!opts.signal) opts.signal = controller.signal;
-      if (typeof setTimeout === "function") {
-        timer = setTimeout(() => {
-          try { controller.abort(); } catch (e) {}
-        }, ms);
-      }
+    if (typeof AbortSignal !== "undefined" && AbortSignal.timeout) return AbortSignal.timeout(ms);
+  } catch (e) {}
+  try {
+    if (typeof AbortController !== "undefined" && typeof setTimeout === "function") {
+      const ctrl = new AbortController();
+      setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, ms);
+      return ctrl.signal;
     }
   } catch (e) {}
-
-  return Promise.resolve()
-    .then(() => fetch(url, opts))
-    .finally(() => {
-      if (timer && typeof clearTimeout === "function") {
-        try { clearTimeout(timer); } catch (e) {}
-      }
-    });
+  return undefined;
 }
 
 // ---------- cookies (manual jar, in case fetch does not keep them) ----------
@@ -78,36 +58,22 @@ function jarHeader() {
 }
 function jarAdd(list) {
   (list || []).forEach((c) => {
-    if (!c) return;
-    const m = /^\s*([^=;\s]+)=([^;]*)/.exec(String(c));
+    const m = /^\s*([^=;\s]+)=([^;]*)/.exec(c);
     if (m) JAR[m[1]] = m[2];
   });
 }
 function jarUpdate(res) {
   try {
-    if (!res || !res.headers) return;
-    if (typeof res.headers.getSetCookie === "function") {
-      jarAdd(res.headers.getSetCookie());
-      return;
-    }
-    if (typeof res.headers.raw === "function") {
-      const raw = res.headers.raw();
-      if (raw && raw["set-cookie"]) {
-        jarAdd(raw["set-cookie"]);
-        return;
-      }
-    }
-    const sc = typeof res.headers.get === "function" ? res.headers.get("set-cookie") : res.headers["set-cookie"];
-    if (sc) {
-      if (Array.isArray(sc)) jarAdd(sc);
-      else jarAdd(String(sc).split(/,(?=\s*[A-Za-z0-9_.\-]+=)/));
-    }
+    if (res.headers && typeof res.headers.getSetCookie === "function") return jarAdd(res.headers.getSetCookie());
+    const sc = res.headers && res.headers.get && res.headers.get("set-cookie");
+    if (sc) jarAdd(sc.split(/,(?=\s*[A-Za-z0-9_.\-]+=)/));
   } catch (e) {}
 }
 
 // fetch with retries on network errors only (never on HTTP status). Cookies are sent ONLY to witanime.
-async function fx(url, opts, tries) {
+async function fx(url, opts, tries, timeoutMs) {
   tries = tries || 4;
+  const ms = timeoutMs || FETCH_TIMEOUT_MS;
   let last = null;
   const own = String(url).indexOf(BASE) === 0;
   for (let i = 0; i < tries; i++) {
@@ -116,7 +82,9 @@ async function fx(url, opts, tries) {
       o.headers = Object.assign({}, o.headers || {});
       const ck = own ? jarHeader() : "";
       if (ck) o.headers["Cookie"] = ck;
-      const r = await fetchWithTimeout(url, o, 10000);
+      const sig = getTimeoutSignal(ms);
+      if (sig) o.signal = sig;
+      const r = await fetch(url, o);
       if (own) jarUpdate(r);
       return r;
     } catch (e) {
@@ -146,41 +114,23 @@ function pageHeaders(referer, dest, site) {
 
 // ---------- helpers ----------
 const norm = (s) =>
-  String(s || "")
-    .toLowerCase()
-    .replace(/&#8217;|&#039;|&amp;|’|'/g, "")
-    .replace(/[^a-z0-9\u0600-\u06ff]+/g, " ")
-    .trim();
+  String(s || "").toLowerCase().replace(/&#8217;|&#039;|&amp;|’|'/g, "").replace(/[^a-z0-9\u0600-\u06ff]+/g, " ").trim();
 
 function similarity(a, b) {
-  const A = new Set(norm(a).split(" ").filter(Boolean));
-  const B = new Set(norm(b).split(" ").filter(Boolean));
+  const A = new Set(norm(a).split(" ")), B = new Set(norm(b).split(" "));
   let hit = 0;
-  A.forEach((w) => {
-    if (B.has(w)) hit++;
-  });
+  A.forEach((w) => B.has(w) && hit++);
   return hit / Math.max(A.size, B.size, 1);
 }
-function safeDecode(s) {
-  try { return decodeURIComponent(s); } catch (e) { return s; }
-}
+function safeDecode(s) { try { return decodeURIComponent(s); } catch (e) { return s; } }
 function absUrl(base, rel) {
-  if (!rel) return "";
   if (/^https?:/i.test(rel)) return rel;
   if (/^\/\//.test(rel)) return "https:" + rel;
   if (rel[0] === "/") return base.replace(/^(https?:\/\/[^\/]+).*/, "$1") + rel;
   return base.replace(/[^\/]*$/, "") + rel;
 }
-function originOf(u) {
-  const m = /^(https?:\/\/[^\/?#]+)/i.exec(u);
-  return m ? m[1] : u;
-}
-const cleanUrl = (u) =>
-  String(u || "")
-    .replace(/&amp;/g, "&")
-    .replace(/\\u0026/g, "&")
-    .replace(/\\\//g, "/")
-    .trim();
+function originOf(u) { const m = /^(https?:\/\/[^\/?#]+)/i.exec(u); return m ? m[1] : u; }
+const cleanUrl = (u) => String(u).replace(/&amp;/g, "&").replace(/\\u0026/g, "&").replace(/\\\//g, "/").trim();
 
 function unpackOne(src, m) {
   try {
@@ -188,15 +138,12 @@ function unpackOne(src, m) {
     const a = parseInt(m[2], 10);
     let c = parseInt(m[3], 10);
     const k = m[4].split("|");
-    const base = (n) =>
-      (n < a ? "" : base(Math.floor(n / a))) +
-      ((n = n % a) > 35 ? String.fromCharCode(n + 29) : n.toString(36));
+    const base = (n) => (n < a ? "" : base(Math.floor(n / a))) + ((n = n % a) > 35 ? String.fromCharCode(n + 29) : n.toString(36));
     while (c--) if (k[c]) p = p.replace(new RegExp("\\b" + base(c) + "\\b", "g"), k[c]);
     return p;
-  } catch (e) {
-    return "";
-  }
+  } catch (e) { return ""; }
 }
+// Unpacks every eval(function(p,a,c,k,e,d){...}) block in the page.
 function unpack(src) {
   const re = /\}\('([\s\S]*?)',\s*(\d+),\s*(\d+),\s*'([\s\S]*?)'\.split\('\|'\)/g;
   let m, out = "";
@@ -208,33 +155,17 @@ function unpack(src) {
 const ORD = { 2: "2nd", 3: "3rd", 4: "4th", 5: "5th", 6: "6th" };
 const ORDW = { 2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth" };
 function seasonRe(n) {
-  return new RegExp(
-    "(?:\\b" + n + "(?:st|nd|rd|th) season|season " + n + "\\b|\\b" + (ORDW[n] || "zzz") + " season|\\b" + n + "nd\\b|\\b" + n + "rd\\b|\\b" + n + "th\\b)",
-    "i"
-  );
+  return new RegExp("(?:\\b" + n + "(?:st|nd|rd|th) season|season " + n + "\\b|\\b" + (ORDW[n] || "zzz") + " season|\\b" + n + "nd\\b|\\b" + n + "rd\\b|\\b" + n + "th\\b)", "i");
 }
 
 async function getTmdbTitles(tmdbId, mediaType) {
-  if (!TMDB_KEY || TMDB_KEY === "PUT_YOUR_TMDB_KEY_HERE") {
-    DIAG.push("tmdb:missing_key");
-    return [];
-  }
   const type = mediaType === "movie" ? "movie" : "tv";
   const out = [];
   for (const lang of ["en-US", "ar-SA"]) {
     try {
-      const r = await fetchWithTimeout(
-        `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${TMDB_KEY}&language=${lang}`,
-        {},
-        8000
-      );
-      const j = await r.json();
-      [j.name || j.title, j.original_name || j.original_title].forEach((t) => {
-        if (t && out.indexOf(t) < 0) out.push(t);
-      });
-    } catch (e) {
-      DIAG.push("tmdb:" + lang + "_err");
-    }
+      const j = await (await fetch(`https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${TMDB_KEY}&language=${lang}`)).json();
+      [j.name || j.title, j.original_name || j.original_title].forEach((t) => { if (t && out.indexOf(t) < 0) out.push(t); });
+    } catch (e) {}
   }
   return out;
 }
@@ -244,20 +175,16 @@ async function anilistTitles(queries, season) {
   const q = "query($s:String){Page(perPage:6){media(search:$s,type:ANIME){title{romaji english} synonyms}}}";
   for (const text of queries.slice(0, 3)) {
     try {
-      const r = await fetchWithTimeout(
-        "https://graphql.anilist.co",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify({ query: q, variables: { s: text } }),
-        },
-        8000
-      );
+      const r = await fetch("https://graphql.anilist.co", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ query: q, variables: { s: text } }),
+      });
       const j = await r.json();
       const media = (j && j.data && j.data.Page && j.data.Page.media) || [];
       let best = null;
       media.forEach((m) => {
-        const names = [m.title && m.title.romaji, m.title && m.title.english].concat(m.synonyms || []).filter(Boolean);
+        const names = [m.title.romaji, m.title.english].concat(m.synonyms || []).filter(Boolean);
         let score = Math.max.apply(null, names.map((n) => similarity(text, n)).concat([0]));
         const hay = names.join(" | ");
         if (season > 1) score += seasonRe(season).test(hay) ? 0.4 : -0.2;
@@ -265,24 +192,15 @@ async function anilistTitles(queries, season) {
         if (!best || score > best.score) best = { score, m };
       });
       if (best && best.score >= 0.5) {
-        [best.m.title && best.m.title.romaji, best.m.title && best.m.title.english].forEach((t) => {
-          if (t && out.indexOf(t) < 0) out.push(t);
-        });
+        [best.m.title.romaji, best.m.title.english].forEach((t) => { if (t && out.indexOf(t) < 0) out.push(t); });
         break;
       }
-    } catch (e) {
-      DIAG.push("anilist err");
-    }
+    } catch (e) { DIAG.push("anilist err"); }
   }
   return out;
 }
 
-const slugify = (t) =>
-  String(t || "")
-    .toLowerCase()
-    .replace(/&#?\w+;/g, " ")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+const slugify = (t) => String(t || "").toLowerCase().replace(/&#?\w+;/g, " ").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
 function slugCandidates(titles, season) {
   const out = [];
@@ -316,11 +234,8 @@ async function tryWatch(slug, episode, isMovie) {
 
 async function search(query) {
   let html = "";
-  try {
-    html = await (await fx(`${BASE}/search?q=${encodeURIComponent(query)}`, { headers: pageHeaders(BASE + "/") })).text();
-  } catch (e) {
-    return [];
-  }
+  try { html = await (await fx(`${BASE}/search?q=${encodeURIComponent(query)}`, { headers: pageHeaders(BASE + "/") })).text(); }
+  catch (e) { return []; }
   const results = [], seen = {};
   const re = /<a[^>]+href="((?:https?:\/\/[^"\/]+)?\/(?:watch|anime)\/([^"\/#?]+)[^"#?]*)"[^>]*>/gi;
   let m;
@@ -412,19 +327,9 @@ async function getTokens(page, csrf) {
       out.push({ token: p.token, label, tab, dl: true, version: p.version || "sub", lang: p.lang || "", pri, h: TAB_H[tab] || 0 });
     });
   });
-  out.sort((a, b) =>
-    (a.version === "sub" ? 0 : 1) - (b.version === "sub" ? 0 : 1) ||
-    b.h - a.h ||
-    (a.dl ? 1 : 0) - (b.dl ? 1 : 0) ||
-    a.pri - b.pri
-  );
+  out.sort((a, b) => (a.version === "sub" ? 0 : 1) - (b.version === "sub" ? 0 : 1) || b.h - a.h || (a.dl ? 1 : 0) - (b.dl ? 1 : 0) || a.pri - b.pri);
   const seen = {};
-  return out.filter((t) => {
-    const k = t.label + t.tab + t.version + (t.dl ? "d" : "s");
-    if (seen[k]) return false;
-    seen[k] = 1;
-    return true;
-  });
+  return out.filter((t) => { const k = t.label + t.tab + t.version + (t.dl ? "d" : "s"); if (seen[k]) return false; seen[k] = 1; return true; });
 }
 
 function gateRaw(url, headers) {
@@ -435,7 +340,7 @@ function gateRaw(url, headers) {
     try {
       const u = new URL(url);
       const req = https.request(
-        { hostname: u.hostname, path: u.pathname + u.search, method: "GET", headers: headers, timeout: 12000 },
+        { hostname: u.hostname, path: u.pathname + u.search, method: "GET", headers: headers, timeout: 15000 },
         (res) => {
           let body = "";
           res.on("data", (d) => (body += d));
@@ -448,9 +353,7 @@ function gateRaw(url, headers) {
       req.on("timeout", () => req.destroy(new Error("timeout")));
       req.on("error", () => resolve({ status: 0, location: "", body: "" }));
       req.end();
-    } catch (e) {
-      resolve(null);
-    }
+    } catch (e) { resolve(null); }
   });
 }
 
@@ -462,10 +365,7 @@ async function openGate(page, csrf, t) {
     let sr;
     try {
       sr = await fx(`${BASE}/watch/${kind}-source/${t.token}`, { method: "POST", headers: xhrHeaders(page, csrf), body: "" }, 2);
-    } catch (e) {
-      DIAG.push(t.label + " source net#" + attempt);
-      continue;
-    }
+    } catch (e) { DIAG.push(t.label + " source net#" + attempt); continue; }
     if (sr.status >= 400) {
       DIAG.push(t.label + " source:" + sr.status);
       if (sr.status === 404 || sr.status === 419) return "";
@@ -473,9 +373,8 @@ async function openGate(page, csrf, t) {
     }
     await sleep(2000);
 
-    const gh = t.dl
-      ? Object.assign({}, pageHeaders(page.url, "document", "same-origin"))
-      : Object.assign({}, pageHeaders("", "iframe", "same-origin"));
+    const gh = t.dl ? Object.assign({}, pageHeaders(page.url, "document", "same-origin"))
+                    : Object.assign({}, pageHeaders("", "iframe", "same-origin"));
     const ck = jarHeader();
     if (ck) gh["Cookie"] = ck;
 
@@ -484,23 +383,14 @@ async function openGate(page, csrf, t) {
     if (raw === null) {
       via = "fetch";
       try {
-        const gr = await fetchWithTimeout(gateUrl, { redirect: "manual", headers: gh }, 10000);
+        const gr = await fetch(gateUrl, { redirect: "manual", headers: gh });
         jarUpdate(gr);
         status = gr.status;
-        try {
-          if (gr.headers && typeof gr.headers.get === "function") loc = gr.headers.get("location") || "";
-          else if (gr.headers && gr.headers.location) loc = gr.headers.location;
-        } catch (e) {}
+        try { loc = gr.headers.get("location") || ""; } catch (e) {}
         if (!loc && gr.url && gr.url !== gateUrl && /^https?:/i.test(gr.url)) loc = gr.url;
         if (!loc) body = await gr.text();
-      } catch (e) {
-        status = 0;
-      }
-    } else {
-      status = raw.status;
-      loc = raw.location;
-      body = raw.body;
-    }
+      } catch (e) { status = 0; }
+    } else { status = raw.status; loc = raw.location; body = raw.body; }
 
     if (!loc && body) {
       const m = /url='([^']+)'|Redirecting to <a href="([^"]+)"/i.exec(body);
@@ -514,41 +404,32 @@ async function openGate(page, csrf, t) {
 
 // ---------- host resolvers ----------
 function b64decode(str) {
-  if (typeof atob === "function") {
-    try { return atob(String(str)); } catch (e) {}
-  }
+  if (typeof atob === "function") { try { return atob(String(str)); } catch (e) {} }
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   str = String(str).replace(/[^A-Za-z0-9+/]/g, "");
   let out = "", bits = 0, val = 0;
   for (let i = 0; i < str.length; i++) {
     val = (val << 6) | chars.indexOf(str[i]);
     bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      out += String.fromCharCode((val >> bits) & 0xff);
-    }
+    if (bits >= 8) { bits -= 8; out += String.fromCharCode((val >> bits) & 0xff); }
   }
   return out;
 }
 
 async function resolveMediafire(pageUrl) {
-  const r = await fx(pageUrl, { headers: { "User-Agent": UA_STR, "Accept-Language": LANG, Accept: "text/html,*/*;q=0.8" } }, 2);
+  const r = await fx(pageUrl, { headers: { "User-Agent": UA_STR, "Accept-Language": LANG, Accept: "text/html,*/*;q=0.8" } }, 3, 30000);
   const html = await r.text();
   let url = "";
   const sc = /data-scrambled-url="([^"]+)"/i.exec(html);
   if (sc) url = b64decode(sc[1]);
   if (!/^https?:\/\//i.test(url)) {
-    const m =
-      /href="(https?:\/\/download[^"]*mediafire\.com[^"]+)"/i.exec(html) ||
-      /id="downloadButton"[^>]*href="(https?:\/\/[^"]+)"/i.exec(html) ||
-      /aria-label="Download file"[^>]*href="(https?:\/\/[^"]+)"/i.exec(html);
+    const m = /href="(https?:\/\/download[^"]*mediafire\.com[^"]+)"/i.exec(html) ||
+              /id="downloadButton"[^>]*href="(https?:\/\/[^"]+)"/i.exec(html) ||
+              /aria-label="Download file"[^>]*href="(https?:\/\/[^"]+)"/i.exec(html);
     url = m ? m[1] : "";
   }
-  return {
-    links: url ? [{ url: cleanUrl(url), quality: "" }] : [],
-    headers: { "User-Agent": UA_STR },
-    info: "mediafire http=" + r.status + " len=" + html.length + " scrambled=" + (sc ? "y" : "n"),
-  };
+  return { links: url ? [{ url: cleanUrl(url), quality: "" }] : [], headers: { "User-Agent": UA_STR },
+           info: "mediafire http=" + r.status + " len=" + html.length + " scrambled=" + (sc ? "y" : "n") };
 }
 
 async function expandHls(master, hdrs) {
@@ -560,10 +441,7 @@ async function expandHls(master, hdrs) {
     for (let i = 0; i < lines.length; i++) {
       if (lines[i].indexOf("#EXT-X-STREAM-INF") !== 0) continue;
       let next = "";
-      for (let k = i + 1; k < lines.length; k++) {
-        const s = lines[k].trim();
-        if (s && s[0] !== "#") { next = s; break; }
-      }
+      for (let k = i + 1; k < lines.length; k++) { const s = lines[k].trim(); if (s && s[0] !== "#") { next = s; break; } }
       const res = /RESOLUTION=(\d+)x(\d+)/.exec(lines[i]);
       if (!next || !res) continue;
       const h = Math.max(parseInt(res[2], 10), Math.round((parseInt(res[1], 10) * 9) / 16));
@@ -576,7 +454,7 @@ async function expandHls(master, hdrs) {
 
 async function resolveEmbed(embedUrl, referers, dumpName) {
   const origin = originOf(embedUrl);
-  const refList = referers && referers.length ? referers : [origin + "/"];
+  const refList = (referers && referers.length ? referers : [origin + "/"]);
   let html = "", status = 0, usedRef = "";
   for (const ref of refList) {
     try {
@@ -585,22 +463,15 @@ async function resolveEmbed(embedUrl, referers, dumpName) {
       html = await r.text();
       usedRef = ref;
       if (status < 400 && html.length > 300) break;
-    } catch (e) {
-      status = 0;
-    }
+    } catch (e) { status = 0; }
   }
   const unp = unpack(html);
   const text = cleanUrl(html + "\n" + unp);
   if (DEBUG && dumpName) {
-    try {
-      if (typeof require === "function") require("fs").writeFileSync(dumpName, html + "\n\n/* ---- UNPACKED ---- */\n" + unp);
-    } catch (e) {}
+    try { require("fs").writeFileSync(dumpName, html + "\n\n/* ---- UNPACKED ---- */\n" + unp); } catch (e) {}
   }
   const found = [], seen = {};
-  const add = (u) => {
-    u = cleanUrl(u);
-    if (u && !seen[u]) { seen[u] = 1; found.push(u); }
-  };
+  const add = (u) => { u = cleanUrl(u); if (u && !seen[u]) { seen[u] = 1; found.push(u); } };
   let m;
   const re = /["'(=:\s](https?:\/\/[^"'\s<>\\)]+\.(?:m3u8|mp4)(?![A-Za-z0-9_])(?:\?[^"'\s<>\\)]*)?)/gi;
   while ((m = re.exec(text))) add(m[1]);
@@ -616,19 +487,11 @@ async function resolveEmbed(embedUrl, referers, dumpName) {
   const play = { "User-Agent": UA_STR, Referer: origin + "/" };
   const links = [];
   for (const u of found.slice(0, 4)) {
-    if (/\.m3u8|\/stream\/|master|playlist/i.test(u) && !/\.mp4(?![A-Za-z0-9_])/i.test(u)) {
-      (await expandHls(u, play)).forEach((l) => links.push(l));
-    } else {
-      links.push({ url: u, quality: "" });
-    }
+    if (/\.m3u8|\/stream\/|master|playlist/i.test(u) && !/\.mp4(?![A-Za-z0-9_])/i.test(u)) (await expandHls(u, play)).forEach((l) => links.push(l));
+    else links.push({ url: u, quality: "" });
   }
-  const info =
-    "embed=" + origin.replace(/^https?:\/\//, "") +
-    " http=" + status +
-    " len=" + html.length +
-    " packed=" + (unp ? "y" : "n") +
-    " found=" + found.length +
-    (usedRef ? " ref=" + originOf(usedRef).replace(/^https?:\/\//, "") : "");
+  const info = "embed=" + origin.replace(/^https?:\/\//, "") + " http=" + status + " len=" + html.length +
+    " packed=" + (unp ? "y" : "n") + " found=" + found.length + (usedRef ? " ref=" + originOf(usedRef).replace(/^https?:\/\//, "") : "");
   return { links, headers: play, info };
 }
 
@@ -640,13 +503,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
   episode = Number(episode) || 1;
   const isMovie = mediaType === "movie";
   const streams = [];
-
-  const fail = (msg) => {
-    if (DEBUG) {
-      try { console.log("WitAnime FAIL:", msg, "|", DIAG.join(" > ")); } catch (e) {}
-    }
-    return [];
-  };
+  const debug = (msg) => (DEBUG ? [{ name: "WitAnime DEBUG", quality: "debug", title: msg + " > " + DIAG.join(" > "), url: "https://debug.invalid/" }] : []);
 
   try {
     let page = null;
@@ -664,12 +521,12 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       }
     }
     if (!page && all.length) page = await findBySearch(all, season, episode, isMovie);
-    if (!page) return fail("episode page not found");
+    if (!page) return debug("episode page not found");
 
     const csrf = csrfOf(page.html);
-    if (!csrf) return fail("no csrf token");
+    if (!csrf) return debug("no csrf token");
     const tokens = await getTokens(page, csrf);
-    if (!tokens.length) return fail("no supported servers");
+    if (!tokens.length) return debug("no supported servers");
 
     let opened = 0;
     for (const t of tokens) {
@@ -702,18 +559,14 @@ async function getStreams(tmdbId, mediaType, season, episode) {
             headers: res.headers,
           });
         });
-      } catch (e) {
-        DIAG.push(t.label + " err " + (e && e.message));
-      }
+      } catch (e) { DIAG.push(t.label + " err " + (e && e.message)); }
     }
-    if (DEBUG) {
-      try { console.log("DIAG:\n  " + DIAG.join("\n  ")); } catch (e) {}
-    }
-    if (!streams.length) return fail("no playable links");
+    if (DEBUG) console.log("DIAG:\n  " + DIAG.join("\n  "));
+    if (!streams.length) return debug("no playable links");
     streams.sort((a, b) => (parseInt(b.quality, 10) || 0) - (parseInt(a.quality, 10) || 0));
     return streams;
   } catch (e) {
-    return fail("error " + (e && e.message));
+    return debug("error " + (e && e.message));
   }
 }
 
