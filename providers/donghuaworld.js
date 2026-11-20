@@ -5,9 +5,13 @@
 
 const BASE = "https://donghuaworld.com";
 const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
-// Desktop UA: the site says Dailymotion serves higher qualities (up to 4K)
-// to desktop clients, while mobile UAs get capped at 720p/1080p.
+// Site / TMDB / generic players: the original mobile UA (known to work with donghuaworld.com).
 const UA = {
+  "User-Agent":
+    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
+};
+// Dailymotion only: desktop UA, since it serves higher qualities (up to 4K) to desktop clients.
+const UA_DM = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 };
@@ -239,7 +243,7 @@ async function linksFromMeta(j, H) {
   } catch (e) {}
   const auto = q.auto && q.auto[0];
   if (auto && auto.url) {
-    let hls = await expandHls(auto.url, UA);
+    let hls = await expandHls(auto.url, UA_DM);
     if (hls.length === 1) hls = await expandHls(auto.url, H);
     hls.forEach((l) => { if (l.master || !seenH[l.height]) out.push(l); });
   }
@@ -254,7 +258,7 @@ async function resolveDailymotion(url, pageUrl) {
   const playerId = (/\/player\/(\w+)\.html/.exec(url) || [])[1];
   const ref = pageUrl || BASE + "/";
   const v1 = randHex(32), ts = String(Math.floor(Math.random() * 90000) + 10000);
-  const H = Object.assign({}, UA, { Referer: ref, Origin: BASE, Cookie: "v1st=" + v1 + "; ts=" + ts });
+  const H = Object.assign({}, UA_DM, { Referer: ref, Origin: BASE, Cookie: "v1st=" + v1 + "; ts=" + ts });
   const plain = `https://www.dailymotion.com/player/metadata/video/${id}`;
 
   // Same parameters the official embedded player sends.
@@ -271,7 +275,7 @@ async function resolveDailymotion(url, pageUrl) {
   const attempts = [
     { name: "full", url: full, h: H },
     { name: "embedder", url: `${plain}?embedder=${encodeURIComponent(ref)}`, h: H },
-    { name: "plain", url: plain, h: UA },
+    { name: "plain", url: plain, h: UA_DM },
   ];
   let best = [], bestName = "";
   for (const at of attempts) {
