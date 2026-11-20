@@ -1,4 +1,3 @@
-
 // WitAnime provider for Nuvio (QuickJS: supports TMDB and Nuvio Kitsu IDs).
 
 const BASE = "https://witanime.site";
@@ -13,13 +12,15 @@ const CH = {
 };
 const LANG = "ar,en-US;q=0.9,en;q=0.8";
 
-const MAX_GATES = 5;
-const GATE_DELAY_MS = 400;
-const FETCH_TIMEOUT_MS = 25000;
+const MAX_GATES = 16;
+const GATE_CONCURRENCY = 4;
+const FETCH_TIMEOUT_MS = 15000;
 
 // Prefer Videa, the server most frequently used on the current WitAnime pages.
-const SUPPORTED = ["videa", "yourupload", "mp4upload", "yonaplay"];
-const DL_SUPPORTED = ["mp4upload", "mediafire"];
+// WitAnime returns this list dynamically. Do not hard-code only a few hosts.
+// Unknown hosts use the generic embed resolver below.
+const SUPPORTED = null;
+const DL_SUPPORTED = null;
 const TAB_H = { FHD: 1080, HD: 720, SD: 480 };
 
 const DEBUG = (function () {
@@ -157,7 +158,18 @@ function formatHostName(label) {
     yourupload: "YourUpload",
     yonaplay: "YonaPlay",
     videa: "Videa",
+    videas: "Videas",
+    videasfr: "VideasFr",
     mediafire: "Mediafire",
+    hgcloud: "HGCloud",
+    streamhg: "StreamHG",
+    dotplay: "DotPlay",
+    okru: "OkRu",
+    fourshared: "FourShared",
+    gofile: "GoFile",
+    workupload: "WorkUpload",
+    mailru: "MailRu",
+    mega: "MegaNz",
   };
   return map[label] || (label ? label.charAt(0).toUpperCase() + label.slice(1) : "Server");
 }
@@ -451,7 +463,7 @@ async function getTokens(page, csrf) {
       (players[tab] || []).forEach((p) => {
         if (!p || !p.token) return;
         const label = String(p.label || "").toLowerCase();
-        const pri = SUPPORTED.indexOf(label);
+        const pri = SUPPORTED ? SUPPORTED.indexOf(label) : 0;
         if (pri < 0) return;
         out.push({ token: p.token, label, tab, version: p.version || "sub", lang: p.lang || "", pri, h: TAB_H[tab] || 0 });
       });
@@ -461,13 +473,13 @@ async function getTokens(page, csrf) {
       (dls[tab] || []).forEach((p) => {
         if (!p || !p.token) return;
         const label = String(p.label || "").toLowerCase();
-        const pri = DL_SUPPORTED.indexOf(label);
+        const pri = DL_SUPPORTED ? DL_SUPPORTED.indexOf(label) : 0;
         if (pri < 0) return;
         out.push({ token: p.token, label, tab, dl: true, version: p.version || "sub", lang: p.lang || "", pri, h: TAB_H[tab] || 0 });
       });
     });
-    if (out.some((t) => t.label === "videa") || attempt === 2) break;
-    await sleep(450);
+    if (out.length || attempt === 2) break;
+    await sleep(250);
   }
   page.csrf = activeCsrf;
   out.sort((a, b) =>
@@ -493,7 +505,7 @@ function gateRaw(url, headers) {
     try {
       const u = new URL(url);
       const req = https.request(
-        { hostname: u.hostname, path: u.pathname + u.search, method: "GET", headers: headers, timeout: 15000 },
+        { hostname: u.hostname, path: u.pathname + u.search, method: "GET", headers: headers, timeout: 9000 },
         (res) => {
           let body = "";
           res.on("data", (d) => (body += d));
@@ -517,10 +529,10 @@ async function openGate(page, csrf, t) {
   const gateUrl = `${BASE}/watch/${kind}-gate/${t.token}`;
   let activeCsrf = page.csrf || csrf;
   for (let attempt = 1; attempt <= 2; attempt++) {
-    if (attempt > 1) await sleep(800);
+    if (attempt > 1) await sleep(350);
     let sr;
     try {
-      sr = await fx(`${BASE}/watch/${kind}-source/${t.token}`, { method: "POST", headers: xhrHeaders(page, activeCsrf), body: "" }, 2);
+      sr = await fx(`${BASE}/watch/${kind}-source/${t.token}`, { method: "POST", headers: xhrHeaders(page, activeCsrf), body: "" }, 1, 9000);
     } catch (e) {
       DIAG.push(t.label + " source net#" + attempt);
       continue;
@@ -540,7 +552,7 @@ async function openGate(page, csrf, t) {
       if ((sr.status === 404 || sr.status === 419) && attempt === 2) return "";
       continue;
     }
-    await sleep(attempt === 1 ? 1000 : 1500);
+    await sleep(attempt === 1 ? 250 : 500);
 
     const gh = t.dl
       ? Object.assign({}, pageHeaders(page.url, "document", "same-origin"))
@@ -646,6 +658,61 @@ async function expandHls(master, hdrs) {
   return out;
 }
 
+
+function cloudstreamProvider(label, embedUrl) {
+  const x = String(label || "").toLowerCase().replace(/[._ -]/g, "");
+  const h = String(embedUrl || "").toLowerCase();
+  if (x === "videas" || x === "videasfr" || /vide[ae]as?\.(com|fr)/.test(h)) return x === "videasfr" ? "videasfr" : "videas";
+  if (x === "hgcloud" || x === "streamhg" || /(?:hgcloud|streamhg|vibuxer|hanerix|dintezuvio|cavanhabg)\./.test(h)) return "hgcloud";
+  if (x === "dotplay" || /dotplay\./.test(h)) return "dotplay";
+  if (x === "okru" || /(?:ok\.ru|odnoklassniki\.)/.test(h)) return "okru";
+  if (x === "fourshared" || /4shared\./.test(h)) return "fourshared";
+  if (x === "gofile" || /gofile\./.test(h)) return "gofile";
+  if (x === "workupload" || /workupload\./.test(h)) return "workupload";
+  if (x === "mailru" || /(?:my\.mail\.ru|cloud\.mail\.ru|mycdn\.me)/.test(h)) return "mailru";
+  if (x === "mega" || /mega\.nz/.test(h)) return "mega";
+  return x;
+}
+
+function addJsonMediaUrls(value, baseUrl, add, depth) {
+  if (depth > 6 || value == null) return;
+  if (typeof value === "string") {
+    const v = cleanUrl(value).replace(/\\u0026/g, "&");
+    if (/^(?:https?:)?\/\//i.test(v)) add(absUrl(baseUrl, v));
+    else if (/^\//.test(v) && /(?:m3u8|mp4|playlist|stream|video|download)/i.test(v)) add(absUrl(baseUrl, v));
+    return;
+  }
+  if (Array.isArray(value)) { value.forEach((x) => addJsonMediaUrls(x, baseUrl, add, depth + 1)); return; }
+  if (typeof value === "object") Object.keys(value).forEach((k) => addJsonMediaUrls(value[k], baseUrl, add, depth + 1));
+}
+
+async function resolveCloudstreamHost(label, embedUrl, pageRef) {
+  const provider = cloudstreamProvider(label, embedUrl);
+  // OK.ru stores playable variants in data-options/options JSON rather than
+  // always exposing a visible .m3u8 URL in the HTML.
+  if (provider === "okru") {
+    try {
+      const r = await fx(embedUrl, { headers: { "User-Agent": UA_STR, Referer: pageRef || BASE + "/", Accept: "text/html,*/*" } }, 1, 9000);
+      const html = await r.text();
+      const urls = [], seen = {};
+      const add = (u) => { u = cleanUrl(u); if (isPlayableMediaUrl(u) && !seen[u]) { seen[u] = 1; urls.push(u); } };
+      let m;
+      const jsonRe = /(?:data-options|data-player-options|options)\s*=\s*["']([^"']+)["']/gi;
+      while ((m = jsonRe.exec(html))) {
+        try { addJsonMediaUrls(JSON.parse(xmlUnescape(m[1]).replace(/&quot;/g, '"')), embedUrl, add, 0); } catch (e) {}
+      }
+      const text = cleanUrl(html).replace(/\\u0022/g, '"').replace(/\\u003A/gi, ':');
+      const directRe = /https?:\/\/[^"'\s<>\\]+(?:m3u8|mp4)[^"'\s<>\\]*/gi;
+      while ((m = directRe.exec(text))) add(m[0]);
+      if (urls.length) return { links: urls.map((u) => ({ url: u, quality: /m3u8/i.test(u) ? "Auto" : "" })), headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "okru json links=" + urls.length };
+    } catch (e) {}
+  }
+  // These providers are represented by dedicated Cloudstream extractors, but
+  // their successful responses commonly contain HLS/MP4 in JSON or scripts.
+  // Feed the expanded generic parser first; it also handles URL-encoded JSON.
+  return resolveEmbed(embedUrl, [pageRef || "", BASE + "/"], DEBUG ? "wit_" + provider + ".html" : "");
+}
+
 async function resolveEmbed(embedUrl, referers, dumpName) {
   const origin = originOf(embedUrl);
   const refList = referers && referers.length ? referers : [origin + "/"];
@@ -684,8 +751,14 @@ async function resolveEmbed(embedUrl, referers, dumpName) {
       if (/\.(?:m3u8|mp4)(?![A-Za-z0-9_])|\/stream\/|master|index|playlist/i.test(v)) add(absUrl(embedUrl, v));
     }
   }
-  const rel = /["'](\/[^"'\s]+\.m3u8[^"'\s]*)["']/gi;
+  const rel = /["'](\/[^"'\s]+(?:\.m3u8|\.mp4|\/stream\/|playlist|master)[^"'\s]*)["']/gi;
   while ((m = rel.exec(text))) add(absUrl(embedUrl, m[1]));
+  // Cloudstream's extractors also walk nested JSON objects. Do the same for
+  // providers such as OkRu, MailRu, GoFile and Videas.
+  const jsonBlocks = text.match(/\{[\s\S]{0,200000}\}/g) || [];
+  jsonBlocks.slice(0, 20).forEach((block) => {
+    try { addJsonMediaUrls(JSON.parse(block), embedUrl, add, 0); } catch (e) {}
+  });
   const play = { "User-Agent": UA_STR, Referer: origin + "/" };
   const links = [];
   for (const u of found.slice(0, 4)) {
@@ -888,47 +961,51 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     csrf = page.csrf || csrf;
     if (!tokens.length) return fail("no supported servers");
 
-    let opened = 0;
-    for (const t of tokens) {
-      if (opened >= MAX_GATES || streams.length >= 6) break;
-      if (opened) await sleep(GATE_DELAY_MS);
-      opened++;
-      try {
-        const embed = await openGate(page, csrf, t);
-        if (!embed) continue;
-        DIAG.push(t.label + (t.dl ? " dl " : " ") + t.tab + " url=" + embed.slice(0, 100));
-        let res;
-        if (t.label === "mediafire") {
-          res = await resolveMediafire(embed);
-        } else if (t.label === "videa") {
-          res = await resolveVidea(embed, page.url);
-        } else {
-          let eu = embed;
-          if (t.label === "mp4upload" && !/\/embed-/.test(eu)) {
-            const idm = /mp4upload\.com\/(?:embed-)?([A-Za-z0-9]+)/.exec(eu);
-            if (idm) eu = "https://www.mp4upload.com/embed-" + idm[1] + ".html";
+    // Open several gates concurrently. The old serial loop made every slow or
+    // dead host add its full timeout to the total load time and returned only
+    // the first playable host. Keep a small concurrency limit for reliability.
+    const candidates = tokens.slice(0, MAX_GATES);
+    let cursor = 0;
+    async function worker() {
+      while (true) {
+        const index = cursor++;
+        if (index >= candidates.length) return;
+        const t = candidates[index];
+        try {
+          const embed = await openGate(page, csrf, t);
+          if (!embed) continue;
+          DIAG.push(t.label + (t.dl ? " dl " : " ") + t.tab + " url=" + embed.slice(0, 100));
+          let res;
+          if (t.label === "mediafire") {
+            res = await resolveMediafire(embed);
+          } else if (t.label === "videa") {
+            res = await resolveVidea(embed, page.url);
+          } else {
+            let eu = embed;
+            if (t.label === "mp4upload" && !/\/embed-/.test(eu)) {
+              const idm = /mp4upload\.com\/(?:embed-)?([A-Za-z0-9]+)/.exec(eu);
+              if (idm) eu = "https://www.mp4upload.com/embed-" + idm[1] + ".html";
+            }
+            res = await resolveCloudstreamHost(t.label, eu, page.url);
           }
-          res = await resolveEmbed(eu, ["", BASE + "/"], DEBUG ? "wit_" + t.label + "_" + t.tab + (t.dl ? "_dl" : "") + ".html" : "");
-        }
-        DIAG.push(t.label + " " + res.info + " links:" + res.links.length);
-        const host = formatHostName(t.label);
-        res.links.forEach((l) => {
-          if (!isPlayableMediaUrl(l.url)) return;
-          streams.push({
-            name: "WitAnime - " + host,
-            title: host + " " + (t.label === "videa" && l.quality ? l.quality : t.tab) + (t.dl ? " dl" : "") + " (" + t.version + ")",
-            url: l.url,
-            quality: l.quality || (t.h ? t.h + "p" : "auto"),
-            headers: res.headers,
+          DIAG.push(t.label + " " + res.info + " links:" + res.links.length);
+          const host = formatHostName(t.label);
+          res.links.forEach((l) => {
+            if (!isPlayableMediaUrl(l.url)) return;
+            streams.push({
+              name: "WitAnime - " + host,
+              title: host + " " + (t.label === "videa" && l.quality ? l.quality : t.tab) + (t.dl ? " dl" : "") + " (" + t.version + ")",
+              url: l.url,
+              quality: l.quality || (t.h ? t.h + "p" : "auto"),
+              headers: res.headers,
+            });
           });
-        });
-        // Nuvio caps each plugin run at 60 seconds. Once a playable server is
-        // found, return its links instead of spending time probing every host.
-        if (streams.length) break;
-      } catch (e) {
-        DIAG.push(t.label + " err " + (e && e.message));
+        } catch (e) {
+          DIAG.push(t.label + " err " + (e && e.message));
+        }
       }
     }
+    await Promise.all(Array.from({ length: Math.min(GATE_CONCURRENCY, candidates.length) }, worker));
     if (DEBUG) {
       try { console.log("DIAG:\n  " + DIAG.join("\n  ")); } catch (e) {}
     }
