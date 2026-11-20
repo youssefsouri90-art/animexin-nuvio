@@ -118,8 +118,8 @@ function unpack(src) {
   } catch (e) { return ""; }
 }
 
-// ---------- TMDB ----------
-async function getTitles(tmdbId, mediaType) {
+// ---------- titles (TMDB + AniList romaji) ----------
+async function getTmdbTitles(tmdbId, mediaType) {
   const type = mediaType === "movie" ? "movie" : "tv";
   const out = [];
   const grab = async (lang) => {
@@ -137,76 +137,124 @@ async function getTitles(tmdbId, mediaType) {
   return out;
 }
 
-// ---------- site ----------
-async function search(query) {
-  const html = await getText(`${BASE}/?search_param=animes&s=${encodeURIComponent(query)}`);
-  const results = [], seen = {};
-  const re = /<a[^>]+href="((?:https?:\/\/[^"\/]+)?\/anime\/[^"#?]+?\/?)"[^>]*>/gi;
-  let m;
-  while ((m = re.exec(html))) {
-    const url = absUrl(BASE + "/", m[1]).replace(/\/?$/, "/");
-    if (seen[url]) continue;
-    seen[url] = 1;
-    const tag = m[0];
-    const t = /title="([^"]+)"/i.exec(tag);
-    const slugTitle = safeDecode(url.replace(/.*\/anime\//, "").replace(/\/$/, "")).replace(/-/g, " ");
-    results.push({ url, title: t ? t[1] : slugTitle, slugTitle });
-  }
-  return results;
+const ORD = { 2: "2nd", 3: "3rd", 4: "4th", 5: "5th", 6: "6th" };
+const ORDW = { 2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth" };
+
+function seasonRe(n) {
+  return new RegExp("(?:\\b" + n + "(?:st|nd|rd|th) season|season " + n + "\\b|\\b" + (ORDW[n] || "zzz") + " season|\\b" + n + "nd\\b|\\b" + n + "rd\\b|\\b" + n + "th\\b)", "i");
 }
 
-async function findSeries(titles, mediaType, season) {
+// The site slugs are romaji ("koori-no-jouheki-2nd-season"), which TMDB does not
+// give for non-English titles, so ask AniList for the romaji/english titles.
+async function anilistTitles(queries, season) {
+  const out = [];
+  const q = "query($s:String){Page(perPage:6){media(search:$s,type:ANIME){title{romaji english} synonyms}}}";
+  for (const text of queries.slice(0, 3)) {
+    try {
+      const r = await fetch("https://graphql.anilist.co", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ query: q, variables: { s: text } }),
+      });
+      const j = await r.json();
+      const media = (j && j.data && j.data.Page && j.data.Page.media) || [];
+      let best = null;
+      media.forEach((m) => {
+        const names = [m.title.romaji, m.title.english].concat(m.synonyms || []).filter(Boolean);
+        let score = Math.max.apply(null, names.map((n) => similarity(text, n)).concat([0]));
+        const hay = names.join(" | ");
+        if (season > 1) score += seasonRe(season).test(hay) ? 0.4 : -0.2;
+        else if (/\b(2nd|3rd|4th|season [2-9])\b/i.test(hay)) score -= 0.2;
+        if (!best || score > best.score) best = { score, m };
+      });
+      if (best && best.score >= 0.5) {
+        [best.m.title.romaji, best.m.title.english].forEach((t) => {
+          if (t && out.indexOf(t) < 0) out.push(t);
+        });
+        break;
+      }
+    } catch (e) { DIAG.push("anilist err " + (e && e.message)); }
+  }
+  return out;
+}
+
+// ---------- site ----------
+const slugify = (t) =>
+  String(t || "").toLowerCase().replace(/&#?\w+;/g, " ").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+function slugCandidates(titles, season) {
+  const out = [];
+  const add = (s) => { if (s && out.indexOf(s) < 0) out.push(s); };
+  titles.forEach((t) => {
+    const base = slugify(t);
+    if (!base) return;
+    add(base);
+    if (season > 1 && !seasonRe(season).test(t)) {
+      add(base + "-" + ORD[season] + "-season");
+      add(base + "-season-" + season);
+    }
+  });
+  return out.slice(0, 8);
+}
+
+// Watch page: /watch/{slug}/{episode}
+async function tryWatch(slug, episode) {
+  const url = `${BASE}/watch/${slug}/${episode}`;
+  try {
+    const r = await fetch(url, { headers: Object.assign({}, UA, { Referer: BASE + "/" }) });
+    const html = await r.text();
+    const bad = (r.status && r.status >= 400) || html.length < 1500 || /<title>[^<]*(404|not found|غير موجود)/i.test(html);
+    DIAG.push("try " + slug + ":" + (r.status || "?") + "/" + html.length + (bad ? ":x" : ":ok"));
+    return bad ? null : { url, html };
+  } catch (e) {
+    DIAG.push("try " + slug + ":err");
+    return null;
+  }
+}
+
+async function search(query) {
+  const urls = [
+    `${BASE}/?search_param=animes&s=${encodeURIComponent(query)}`,
+    `${BASE}/?s=${encodeURIComponent(query)}`,
+  ];
+  for (const u of urls) {
+    let html = "";
+    try { html = await getText(u); } catch (e) { continue; }
+    const results = [], seen = {};
+    const re = /<a[^>]+href="((?:https?:\/\/[^"\/]+)?\/(?:watch|anime)\/([^"\/#?]+)[^"#?]*)"[^>]*>/gi;
+    let m;
+    while ((m = re.exec(html))) {
+      const slug = m[2];
+      if (seen[slug]) continue;
+      seen[slug] = 1;
+      const t = /title="([^"]+)"/i.exec(m[0]);
+      const slugTitle = safeDecode(slug).replace(/-/g, " ");
+      results.push({ slug, title: t ? t[1] : slugTitle, slugTitle });
+    }
+    DIAG.push("search " + results.length);
+    if (results.length) return results;
+  }
+  return [];
+}
+
+async function findBySearch(titles, season, episode) {
   const queries = [];
   titles.forEach((t) => {
-    if (mediaType === "tv" && season > 1) queries.push(`${t} season ${season}`);
+    if (season > 1) queries.push(`${t} ${ORD[season] || season} season`);
     queries.push(t);
   });
   let best = null;
-  for (const q of queries) {
-    const res = await search(q);
-    for (const r of res) {
+  for (const q of queries.slice(0, 6)) {
+    for (const r of await search(q)) {
       let score = Math.max(similarity(q, r.title), similarity(q, r.slugTitle));
-      if (mediaType === "tv" && season > 1 && new RegExp(`(season|الموسم)[ -]*${season}\\b`, "i").test(r.title + " " + r.slugTitle)) score += 0.3;
+      if (season > 1 && seasonRe(season).test(r.title + " " + r.slugTitle)) score += 0.3;
       if (!best || score > best.score) best = Object.assign({ score }, r);
     }
     if (best && best.score >= 0.8) break;
   }
-  return best && best.score >= 0.5 ? best : null;
-}
-
-// Episode links look like: /episode/{slug}-الحلقة-12/  (URL-encoded Arabic)
-function episodeNumber(url) {
-  const s = safeDecode(url);
-  const m = /(?:الحلقة|episode|ep)[-_ ]*(\d+)/i.exec(s);
-  return m ? parseInt(m[1], 10) : null;
-}
-
-async function findEpisodeUrl(seriesUrl, episode) {
-  const html = await getText(seriesUrl);
-  const re = /href="((?:https?:\/\/[^"\/]+)?\/episode\/[^"#?]+?\/?)"/gi;
-  const links = [], seen = {};
-  let m;
-  while ((m = re.exec(html))) {
-    const u = absUrl(BASE + "/", m[1]);
-    if (!seen[u]) { seen[u] = 1; links.push(u); }
-  }
-  DIAG.push("eplinks=" + links.length);
-  const ep = Number(episode);
-  for (const u of links) if (episodeNumber(u) === ep) return u;
-  // Fallback: list is paginated/lazy -> rewrite the number in a sibling link.
-  const sample = links.find((u) => episodeNumber(u) !== null);
-  if (sample) {
-    const guess = safeDecode(sample).replace(/((?:الحلقة|episode|ep)[-_ ]*)\d+/i, "$1" + ep);
-    DIAG.push("epguess");
-    return encodeURI(guess);
-  }
-  return null;
-}
-
-async function findMovieUrl(seriesUrl) {
-  const html = await getText(seriesUrl);
-  const m = /href="((?:https?:\/\/[^"\/]+)?\/episode\/[^"#?]+?\/?)"/i.exec(html);
-  return m ? absUrl(BASE + "/", m[1]) : seriesUrl;
+  if (!best || best.score < 0.5) return null;
+  DIAG.push("search-best " + best.slug);
+  return await tryWatch(best.slug, episode);
 }
 
 // ---------- server discovery ----------
@@ -556,20 +604,28 @@ async function getStreams(tmdbId, mediaType, season, episode) {
   DIAG.length = 0;
   const fail = (m) => [{ name: "WitAnime DEBUG", title: dbg.concat(m, DIAG).join(" > ").slice(0, 1200), url: "https://debug.invalid/", quality: "debug" }];
   try {
-    const titles = await getTitles(tmdbId, mediaType);
+    const sNum = Number(season) || 1;
+    const ep = mediaType === "tv" ? (episode || 1) : 1;
+    const titles = await getTmdbTitles(tmdbId, mediaType);
     dbg.push("titles=" + titles.join("|"));
     if (!titles.length) return fail("no titles");
-    const series = await findSeries(titles, mediaType, Number(season) || 1);
-    dbg.push("series=" + (series ? series.url : "none"));
-    if (!series) return fail("series not found");
 
-    const pageUrl = mediaType === "tv"
-      ? await findEpisodeUrl(series.url, episode || 1)
-      : await findMovieUrl(series.url);
+    const alt = await anilistTitles(titles, mediaType === "tv" ? sNum : 1);
+    dbg.push("anilist=" + (alt.join("|") || "none"));
+
+    // 1) direct: /watch/{slug}/{episode} with slugs built from romaji/english titles
+    let found = null;
+    for (const slug of slugCandidates(alt.concat(titles), mediaType === "tv" ? sNum : 1)) {
+      found = await tryWatch(slug, ep);
+      if (found) break;
+    }
+    // 2) fallback: site search
+    if (!found) found = await findBySearch(alt.concat(titles), mediaType === "tv" ? sNum : 1, ep);
+    if (!found) return fail("episode page not found");
+    const pageUrl = found.url;
+    const html = found.html;
     dbg.push("ep=" + pageUrl);
-    if (!pageUrl) return fail("episode not found");
 
-    const html = await getText(pageUrl);
     const servers = extractServers(html).slice(0, 8);
     dbg.push("servers=" + servers.length + "[" + servers.map((s) => s.kind).join(",") + "]");
     if (!servers.length) dbg.push("html=" + html.length);
