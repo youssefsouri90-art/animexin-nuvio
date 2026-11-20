@@ -169,18 +169,53 @@ async function expandHls(masterUrl, hdrs) {
   return out;
 }
 
-async function resolveDailymotion(url) {
+async function resolveDailymotion(url, pageUrl) {
   const id = (/[?&]video=([^&]+)/.exec(url) || /\/video\/([^?_\/]+)/.exec(url) || [])[1];
   if (!id) return [];
-  const j = await (await fetch(`https://www.dailymotion.com/player/metadata/video/${id}`, { headers: UA })).json();
-  const auto = j && j.qualities && j.qualities.auto && j.qualities.auto[0];
-  if (!auto) return [];
-  return await expandHls(auto.url, UA);
+  // Dailymotion limits quality for requests that look like a bare client,
+  // so identify as the embedding site (like a real player would).
+  const H = Object.assign({}, UA, { Referer: pageUrl || BASE + "/", Origin: BASE });
+  const metaUrls = [
+    `https://www.dailymotion.com/player/metadata/video/${id}?embedder=${encodeURIComponent(pageUrl || BASE + "/")}`,
+    `https://www.dailymotion.com/player/metadata/video/${id}`,
+  ];
+  let q = null;
+  for (const u of metaUrls) {
+    try {
+      const j = await (await fetch(u, { headers: H })).json();
+      if (j && j.qualities) { q = j.qualities; break; }
+    } catch (e) {}
+  }
+  if (!q) return [];
+
+  const out = [];
+  const seenH = {};
+  // 1) explicit per-quality entries (usually muxed, with audio)
+  Object.keys(q).forEach((k) => {
+    if (!/^\d+$/.test(k)) return;
+    const list = q[k] || [];
+    list.forEach((it) => {
+      if (!it || !it.url || it.type === "application/x-mpegURL") return;
+      const h = parseInt(k, 10);
+      if (seenH[h]) return;
+      seenH[h] = 1;
+      out.push({ url: it.url, quality: qualityLabel(h), height: h });
+    });
+  });
+  // 2) HLS master (adaptive) + its variants
+  const auto = q.auto && q.auto[0];
+  if (auto && auto.url) {
+    const hls = await expandHls(auto.url, H);
+    hls.forEach((l) => { if (l.master || !seenH[l.height]) out.push(l); });
+  }
+  const heights = out.filter((o) => o.height).map((o) => o.height).sort((x, y) => x - y);
+  out.forEach((o) => { o.info = "found: " + (heights.join(",") || "auto only"); o.hdrs = H; });
+  return out;
 }
 
-async function resolve(embed) {
+async function resolve(embed, pageUrl) {
   try {
-    if (/dailymotion\.com/.test(embed)) return await resolveDailymotion(embed);
+    if (/dailymotion\.com/.test(embed)) return await resolveDailymotion(embed, pageUrl);
   } catch (e) {}
   return [];
 }
@@ -208,15 +243,15 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     const is4kPage = /-4k-/.test(pageUrl);
     const streams = [];
     for (const e of embeds) {
-      const links = await resolve(e);
+      const links = await resolve(e, pageUrl);
       links.sort((a, b) => b.height - a.height);
       links.forEach((l) =>
         streams.push({
           name: "DonghuaWorld",
-          title: "Dailymotion" + (is4kPage ? " [4K source]" : ""),
+          title: "Dailymotion" + (is4kPage ? " [4K source]" : "") + " (" + l.info + ")",
           url: l.url,
           quality: l.quality,
-          headers: UA,
+          headers: l.hdrs || UA,
           provider: "donghuaworld",
         })
       );
