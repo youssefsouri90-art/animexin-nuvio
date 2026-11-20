@@ -140,76 +140,85 @@ async function expandHls(masterUrl, hdrs) {
   try {
     const txt = await getText(masterUrl, hdrs);
     const lines = txt.split(/\r?\n/);
-    const hasSeparateAudio = /#EXT-X-MEDIA:[^\n]*TYPE=AUDIO[^\n]*URI=/.test(txt);
-    const variants = [];
+    const byHeight = {};
     for (let i = 0; i < lines.length; i++) {
-      if (lines[i].indexOf("#EXT-X-STREAM-INF") !== 0) continue;
-      const res = /RESOLUTION=(\d+)x(\d+)/.exec(lines[i]);
-      const next = (lines[i + 1] || "").trim();
-      if (res && next && next[0] !== "#") {
-        variants.push({ url: absUrl(masterUrl, next), height: parseInt(res[2], 10) });
+      const line = lines[i];
+      if (line.indexOf("#EXT-X-STREAM-INF") !== 0) continue;
+      let next = "";
+      for (let k = i + 1; k < lines.length; k++) {
+        const t = lines[k].trim();
+        if (t && t[0] !== "#") { next = t; break; }
+      }
+      if (!next) continue;
+      const res = /RESOLUTION=(\d+)x(\d+)/.exec(line);
+      const nm = /NAME="?(\d{3,4})p?"?/.exec(line);
+      const h = res ? parseInt(res[2], 10) : nm ? parseInt(nm[1], 10) : 0;
+      if (!h) continue;
+      const bw = parseInt((/(?:^|[,:])BANDWIDTH=(\d+)/.exec(line) || [0, 0])[1], 10);
+      const avc = /avc1/i.test(line);
+      const cur = byHeight[h];
+      // one entry per quality; prefer H.264 (plays everywhere), then bitrate
+      if (!cur || (avc && !cur.avc) || (avc === cur.avc && bw > cur.bw)) {
+        byHeight[h] = { url: absUrl(masterUrl, next), height: h, bw: bw, avc: avc };
       }
     }
-    if (variants.length) {
-      const max = Math.max.apply(null, variants.map((v) => v.height));
-      out[0].quality = "Auto (up to " + qualityLabel(max) + ")";
-      out[0].height = max;
-      // Separate audio tracks would be lost on a bare variant URL, so only
-      // offer per-quality links when audio is muxed into the variants.
-      if (!hasSeparateAudio) {
-        const seen = {};
-        variants.forEach((v) => {
-          if (seen[v.height]) return;
-          seen[v.height] = 1;
-          out.push({ url: v.url, quality: qualityLabel(v.height), height: v.height });
-        });
-      }
+    const hs = Object.keys(byHeight).map(Number).sort((x, y) => y - x);
+    if (hs.length) {
+      out[0].quality = "Auto (up to " + qualityLabel(hs[0]) + ")";
+      out[0].height = hs[0];
+      hs.forEach((h) => out.push({ url: byHeight[h].url, quality: qualityLabel(h), height: h }));
     }
   } catch (e) {}
   return out;
 }
 
+async function fetchJsonSafe(u, h) {
+  try {
+    const r = await fetch(u, { headers: h });
+    const t = await r.text();
+    const j = JSON.parse(t);
+    return j && j.qualities ? j : null;
+  } catch (e) { return null; }
+}
+
 async function resolveDailymotion(url, pageUrl) {
   const id = (/[?&]video=([^&]+)/.exec(url) || /\/video\/([^?_\/]+)/.exec(url) || [])[1];
   if (!id) return [];
-  // Dailymotion limits quality for requests that look like a bare client,
-  // so identify as the embedding site (like a real player would).
-  const H = Object.assign({}, UA, { Referer: pageUrl || BASE + "/", Origin: BASE });
-  const metaUrls = [
-    `https://www.dailymotion.com/player/metadata/video/${id}?embedder=${encodeURIComponent(pageUrl || BASE + "/")}`,
-    `https://www.dailymotion.com/player/metadata/video/${id}`,
-  ];
-  let q = null;
-  for (const u of metaUrls) {
-    try {
-      const j = await (await fetch(u, { headers: H })).json();
-      if (j && j.qualities) { q = j.qualities; break; }
-    } catch (e) {}
-  }
-  if (!q) return [];
+  const ref = pageUrl || BASE + "/";
+  const H = Object.assign({}, UA, { Referer: ref, Origin: BASE });
+  const plain = `https://www.dailymotion.com/player/metadata/video/${id}`;
+
+  // Try the "embedded player" style request first, then fall back to the
+  // plain request that is known to work.
+  let j = await fetchJsonSafe(`${plain}?embedder=${encodeURIComponent(ref)}`, H);
+  if (!j) j = await fetchJsonSafe(plain, H);
+  if (!j) j = await fetchJsonSafe(plain, UA);
+  if (!j) return [];
+  const q = j.qualities;
 
   const out = [];
   const seenH = {};
-  // 1) explicit per-quality entries (usually muxed, with audio)
-  Object.keys(q).forEach((k) => {
-    if (!/^\d+$/.test(k)) return;
-    const list = q[k] || [];
-    list.forEach((it) => {
-      if (!it || !it.url || it.type === "application/x-mpegURL") return;
-      const h = parseInt(k, 10);
-      if (seenH[h]) return;
-      seenH[h] = 1;
-      out.push({ url: it.url, quality: qualityLabel(h), height: h });
+  try {
+    Object.keys(q).forEach((k) => {
+      if (!/^\d+$/.test(k)) return;
+      (q[k] || []).forEach((it) => {
+        if (!it || !it.url || it.type === "application/x-mpegURL") return;
+        const h = parseInt(k, 10);
+        if (seenH[h]) return;
+        seenH[h] = 1;
+        out.push({ url: it.url, quality: qualityLabel(h), height: h });
+      });
     });
-  });
-  // 2) HLS master (adaptive) + its variants
+  } catch (e) {}
+
   const auto = q.auto && q.auto[0];
   if (auto && auto.url) {
-    const hls = await expandHls(auto.url, H);
+    let hls = await expandHls(auto.url, H);
+    if (hls.length === 1 && !hls[0].height) hls = await expandHls(auto.url, UA);
     hls.forEach((l) => { if (l.master || !seenH[l.height]) out.push(l); });
   }
   const heights = out.filter((o) => o.height).map((o) => o.height).sort((x, y) => x - y);
-  out.forEach((o) => { o.info = "found: " + (heights.join(",") || "auto only"); o.hdrs = H; });
+  out.forEach((o) => { o.info = "found: " + (heights.join(",") || "auto only"); });
   return out;
 }
 
@@ -251,7 +260,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
           title: "Dailymotion" + (is4kPage ? " [4K source]" : "") + " (" + l.info + ")",
           url: l.url,
           quality: l.quality,
-          headers: l.hdrs || UA,
+          headers: UA,
           provider: "donghuaworld",
         })
       );
