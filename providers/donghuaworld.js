@@ -156,6 +156,7 @@ async function expandHls(masterUrl, hdrs) {
   const out = [{ url: masterUrl, quality: "Auto", height: 0, master: true }];
   try {
     const txt = await getText(masterUrl, hdrs);
+    if (txt.indexOf("#EXTM3U") !== 0) DIAG.push("master?" + txt.length + ":" + txt.slice(0, 30).replace(/\s+/g, " "));
     const lines = txt.split(/\r?\n/);
     const byHeight = {};
     for (let i = 0; i < lines.length; i++) {
@@ -169,7 +170,10 @@ async function expandHls(masterUrl, hdrs) {
       if (!next) continue;
       const res = /RESOLUTION=(\d+)x(\d+)/.exec(line);
       const nm = /NAME="?(\d{3,4})p?"?/.exec(line);
-      const h = res ? parseInt(res[2], 10) : nm ? parseInt(nm[1], 10) : 0;
+      const hRaw = res ? parseInt(res[2], 10) : nm ? parseInt(nm[1], 10) : 0;
+      const wRaw = res ? parseInt(res[1], 10) : 0;
+      // scope/letterboxed video (e.g. 1280x544) is really the 720p tier
+      const h = Math.max(hRaw, Math.round((wRaw * 9) / 16));
       if (!h) continue;
       const bw = parseInt((/(?:^|[,:])BANDWIDTH=(\d+)/.exec(line) || [0, 0])[1], 10);
       const avc = /avc1/i.test(line);
@@ -223,7 +227,8 @@ async function linksFromMeta(j, H) {
   } catch (e) {}
   const auto = q.auto && q.auto[0];
   if (auto && auto.url) {
-    const hls = await expandHls(auto.url, H);
+    let hls = await expandHls(auto.url, UA);
+    if (hls.length === 1) hls = await expandHls(auto.url, H);
     hls.forEach((l) => { if (l.master || !seenH[l.height]) out.push(l); });
   }
   return out;
@@ -304,6 +309,7 @@ async function resolveGeneric(embed, pageUrl) {
     const u = m[0].replace(/&amp;/g, "&");
     if (!seen[u]) { seen[u] = 1; urls.push(u); }
   }
+  DIAG.push("gen " + embed.slice(0, 110) + " len=" + html.length + " m3u8=" + urls.length);
   const PH = Object.assign({}, UA, { Referer: embed, Origin: origin });
   const out = [];
   for (const u of urls.slice(0, 3)) {
@@ -359,8 +365,8 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         })
       );
     }
-    if (!streams.length) return [{ name: "DEBUG " + DIAG.join(" | ").slice(0, 400), title: dbg.concat("no playable streams").join(" > "), url: "https://debug.invalid/", quality: "debug" }];
-    streams.push({ name: "INFO " + DIAG.join(" | ").slice(0, 400), title: DIAG.join(" | ").slice(0, 400), url: "https://debug.invalid/", quality: "info" });
+    if (!streams.length) return [{ name: "DEBUG " + DIAG.join(" | ").slice(0, 700), title: dbg.concat("no playable streams").join(" > "), url: "https://debug.invalid/", quality: "debug" }];
+    streams.push({ name: "INFO " + DIAG.join(" | ").slice(0, 700), title: DIAG.join(" | ").slice(0, 700), url: "https://debug.invalid/", quality: "info" });
     return streams;
   } catch (err) {
     return fail("ERROR " + (err && err.message));
