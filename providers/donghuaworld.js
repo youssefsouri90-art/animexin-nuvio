@@ -102,19 +102,36 @@ async function findMovieUrl(seriesUrl) {
 
 function extractEmbeds(html) {
   const found = {}, out = [];
-  const add = (u) => { u = u.replace(/&amp;/g, "&").replace(/^\/\//, "https://"); if (!found[u]) { found[u] = 1; out.push(u); } };
+  const add = (u) => {
+    u = String(u).replace(/&amp;/g, "&").replace(/\\\//g, "/").replace(/^\/\//, "https://");
+    if (!/^https?:\/\//i.test(u)) return;
+    if (/(histats|google|facebook|twitter|t\.me|whatsapp|gravatar|wp-content|wp-json|disqus)/i.test(u)) return;
+    if (!found[u]) { found[u] = 1; out.push(u); }
+  };
   let m;
   const dm = /https?:\/\/geo\.dailymotion\.com\/player\/\w+\.html\?video=[\w]+/g;
   while ((m = dm.exec(html))) add(m[0]);
   const dm2 = /https?:\/\/(?:www\.)?dailymotion\.com\/(?:embed\/)?video\/[\w]+/g;
   while ((m = dm2.exec(html))) add(m[0]);
-  // base64 <option value="..."> servers (same theme family as other sites)
-  const opt = /<option[^>]*value="([A-Za-z0-9+/=]{24,})"/g;
-  while ((m = opt.exec(html))) {
+
+  // every iframe / lazy iframe
+  const ifr = /<iframe[^>]+(?:src|data-src|data-lazy-src)=["']([^"']+)["']/gi;
+  while ((m = ifr.exec(html))) add(m[1]);
+
+  // base64 payloads in value= / data-*= attributes (server selectors)
+  const attr = /(?:value|data-[\w-]+)=["']([A-Za-z0-9+/=]{24,})["']/g;
+  while ((m = attr.exec(html))) {
     const d = b64decode(m[1]);
     const f = /<iframe[^>]+src=["']([^"']+)["']/i.exec(d);
     if (f) add(f[1]);
+    else if (/^https?:\/\//i.test(d.trim())) add(d.trim());
   }
+  // plain URLs in data-* attributes of server buttons
+  const du = /data-(?:src|url|embed|link|video|server)[\w-]*=["'](https?:\/\/[^"']+)["']/gi;
+  while ((m = du.exec(html))) add(m[1]);
+  // direct playlists anywhere in the page
+  const pl = /https?:\\?\/\\?\/[^"'\s<>\\]+?\.m3u8[^"'\s<>\\]*/g;
+  while ((m = pl.exec(html))) add(m[0]);
   return out;
 }
 
@@ -250,13 +267,56 @@ async function resolveDailymotion(url, pageUrl) {
     if (maxH(links) > maxH(best) || (!best.length && links.length)) { best = links; bestName = at.name; }
     if (maxH(best) >= 2000) break;
   }
+  // Some private embeds (video=k...) map to a public id (x...); ask for that too.
+  if (maxH(best) < 1000) {
+    try {
+      const j0 = await fetchJsonSafe(full, H);
+      const xid = j0 && (j0.id || j0.video_id);
+      if (xid && xid !== id) {
+        const j = await fetchJsonSafe(`https://www.dailymotion.com/player/metadata/video/${xid}?embedder=${encodeURIComponent(ref)}&dmV1st=${v1}&dmTs=${ts}`, H);
+        if (j) {
+          const links = await linksFromMeta(j, H);
+          DIAG.push("xid:" + (links.map((l) => l.height).filter(Boolean).sort((x, y) => x - y).join("/") || "auto"));
+          if (maxH(links) > maxH(best)) { best = links; bestName = "xid"; }
+        }
+      }
+    } catch (e) {}
+  }
   best.forEach((o) => { o.info = bestName; });
   return best;
+}
+
+function hostOf(u) {
+  const m = /^https?:\/\/([^\/?#]+)/i.exec(u);
+  return m ? m[1] : u;
+}
+
+// Best-effort for non-Dailymotion players: fetch the player page and look
+// for HLS playlists in it.
+async function resolveGeneric(embed, pageUrl) {
+  const origin = "https://" + hostOf(embed);
+  const H = Object.assign({}, UA, { Referer: pageUrl || BASE + "/" });
+  const html = (await getText(embed, H)).replace(/\\\//g, "/");
+  const urls = [], seen = {};
+  let m;
+  const re = /https?:\/\/[^"'\s<>\\]+?\.m3u8[^"'\s<>\\]*/g;
+  while ((m = re.exec(html))) {
+    const u = m[0].replace(/&amp;/g, "&");
+    if (!seen[u]) { seen[u] = 1; urls.push(u); }
+  }
+  const PH = Object.assign({}, UA, { Referer: embed, Origin: origin });
+  const out = [];
+  for (const u of urls.slice(0, 3)) {
+    const hls = await expandHls(u, PH);
+    hls.forEach((l) => { l.hdrs = PH; l.host = hostOf(embed); out.push(l); });
+  }
+  return out;
 }
 
 async function resolve(embed, pageUrl) {
   try {
     if (/dailymotion\.com/.test(embed)) return await resolveDailymotion(embed, pageUrl);
+    return await resolveGeneric(embed, pageUrl);
   } catch (e) {}
   return [];
 }
@@ -282,6 +342,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
     const embeds = extractEmbeds(await getText(pageUrl));
     dbg.push("embeds=" + embeds.length);
+    DIAG.push("embeds[" + embeds.map(hostOf).join(",") + "]");
     const is4kPage = /-4k-/.test(pageUrl);
     const streams = [];
     for (const e of embeds) {
@@ -290,16 +351,16 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       links.forEach((l) =>
         streams.push({
           name: "DonghuaWorld",
-          title: "Dailymotion" + (is4kPage ? " [4K source]" : "") + " (" + l.info + ")",
+          title: (l.host || "Dailymotion") + (is4kPage ? " [4K source]" : "") + (l.info ? " (" + l.info + ")" : ""),
           url: l.url,
           quality: l.quality,
-          headers: UA,
+          headers: l.hdrs || UA,
           provider: "donghuaworld",
         })
       );
     }
-    if (!streams.length) return fail("no playable streams " + DIAG.join(" | "));
-    streams.push({ name: "DonghuaWorld INFO", title: "diag " + DIAG.join(" | "), url: "https://debug.invalid/", quality: "info" });
+    if (!streams.length) return [{ name: "DEBUG " + DIAG.join(" | ").slice(0, 400), title: dbg.concat("no playable streams").join(" > "), url: "https://debug.invalid/", quality: "debug" }];
+    streams.push({ name: "INFO " + DIAG.join(" | ").slice(0, 400), title: DIAG.join(" | ").slice(0, 400), url: "https://debug.invalid/", quality: "info" });
     return streams;
   } catch (err) {
     return fail("ERROR " + (err && err.message));
