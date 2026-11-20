@@ -614,11 +614,18 @@ async function getStreams(tmdbId, mediaType, season, episode) {
   const isMovie = mediaType === "movie";
   const streams = [];
 
+  // Temporary Nuvio diagnostic: return a visible result instead of silently
+  // returning an empty array. Its title contains the failure stage and trace.
   const fail = (msg) => {
-    if (DEBUG) {
-      try { console.log("WitAnime FAIL:", msg, "|", DIAG.join(" > ")); } catch (e) {}
-    }
-    return [];
+    const trace = DIAG.join(" > ");
+    const detail = ("WitAnime DEBUG | " + msg + (trace ? " | " + trace : "")).slice(0, 1200);
+    try { console.log(detail); } catch (e) {}
+    return [{
+      name: "WitAnime DEBUG",
+      title: detail,
+      url: "https://debug.invalid/",
+      quality: "debug",
+    }];
   };
 
   try {
