@@ -393,37 +393,61 @@ function xhrHeaders(page, csrf) {
 }
 
 async function getTokens(page, csrf) {
-  const r = await fx(sourcesUrlOf(page), { method: "POST", headers: xhrHeaders(page, csrf), body: "" });
-  const txt = await r.text();
-  DIAG.push("sources:" + r.status);
-  let j;
-  try { j = JSON.parse(txt); } catch (e) { return []; }
   const out = [];
-  const players = (j && j.players) || {};
-  Object.keys(players).forEach((tab) => {
-    (players[tab] || []).forEach((p) => {
-      if (!p || !p.token) return;
-      const label = String(p.label || "").toLowerCase();
-      const pri = SUPPORTED.indexOf(label);
-      if (pri < 0) return;
-      out.push({ token: p.token, label, tab, version: p.version || "sub", lang: p.lang || "", pri, h: TAB_H[tab] || 0 });
+  let activeCsrf = csrf || csrfOf(page.html);
+  // WitAnime sometimes returns a partial source list; retry once when Videa is absent.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    let r = null, j = null;
+    try {
+      r = await fx(sourcesUrlOf(page), { method: "POST", headers: xhrHeaders(page, activeCsrf), body: "" }, 1, 12000);
+      const txt = await r.text();
+      DIAG.push("sources#" + attempt + ":" + r.status);
+      try { j = JSON.parse(txt); } catch (e) {}
+    } catch (e) {
+      DIAG.push("sources#" + attempt + ":net");
+    }
+
+    // A CSRF/session mismatch can be temporary. Refresh the watch page once before retrying.
+    if (r && r.status === 419 && attempt === 1) {
+      try {
+        const fresh = await fx(page.url, { headers: pageHeaders(BASE + "/") }, 1, 12000);
+        if (fresh.status < 400) {
+          page.html = await fresh.text();
+          activeCsrf = csrfOf(page.html) || activeCsrf;
+          page.csrf = activeCsrf;
+        }
+      } catch (e) {}
+    }
+
+    const players = (j && j.players) || {};
+    Object.keys(players).forEach((tab) => {
+      (players[tab] || []).forEach((p) => {
+        if (!p || !p.token) return;
+        const label = String(p.label || "").toLowerCase();
+        const pri = SUPPORTED.indexOf(label);
+        if (pri < 0) return;
+        out.push({ token: p.token, label, tab, version: p.version || "sub", lang: p.lang || "", pri, h: TAB_H[tab] || 0 });
+      });
     });
-  });
-  const dls = (j && j.downloads) || {};
-  Object.keys(dls).forEach((tab) => {
-    (dls[tab] || []).forEach((p) => {
-      if (!p || !p.token) return;
-      const label = String(p.label || "").toLowerCase();
-      const pri = DL_SUPPORTED.indexOf(label);
-      if (pri < 0) return;
-      out.push({ token: p.token, label, tab, dl: true, version: p.version || "sub", lang: p.lang || "", pri, h: TAB_H[tab] || 0 });
+    const dls = (j && j.downloads) || {};
+    Object.keys(dls).forEach((tab) => {
+      (dls[tab] || []).forEach((p) => {
+        if (!p || !p.token) return;
+        const label = String(p.label || "").toLowerCase();
+        const pri = DL_SUPPORTED.indexOf(label);
+        if (pri < 0) return;
+        out.push({ token: p.token, label, tab, dl: true, version: p.version || "sub", lang: p.lang || "", pri, h: TAB_H[tab] || 0 });
+      });
     });
-  });
+    if (out.some((t) => t.label === "videa") || attempt === 2) break;
+    await sleep(450);
+  }
+  page.csrf = activeCsrf;
   out.sort((a, b) =>
     (a.version === "sub" ? 0 : 1) - (b.version === "sub" ? 0 : 1) ||
-    b.h - a.h ||
     (a.dl ? 1 : 0) - (b.dl ? 1 : 0) ||
-    a.pri - b.pri
+    a.pri - b.pri ||
+    b.h - a.h
   );
   const seen = {};
   return out.filter((t) => {
@@ -464,18 +488,29 @@ function gateRaw(url, headers) {
 async function openGate(page, csrf, t) {
   const kind = t.dl ? "download" : "stream";
   const gateUrl = `${BASE}/watch/${kind}-gate/${t.token}`;
+  let activeCsrf = page.csrf || csrf;
   for (let attempt = 1; attempt <= 2; attempt++) {
     if (attempt > 1) await sleep(800);
     let sr;
     try {
-      sr = await fx(`${BASE}/watch/${kind}-source/${t.token}`, { method: "POST", headers: xhrHeaders(page, csrf), body: "" }, 2);
+      sr = await fx(`${BASE}/watch/${kind}-source/${t.token}`, { method: "POST", headers: xhrHeaders(page, activeCsrf), body: "" }, 2);
     } catch (e) {
       DIAG.push(t.label + " source net#" + attempt);
       continue;
     }
     if (sr.status >= 400) {
       DIAG.push(t.label + " source:" + sr.status);
-      if (sr.status === 404 || sr.status === 419) return "";
+      if (sr.status === 419 && attempt === 1) {
+        try {
+          const fresh = await fx(page.url, { headers: pageHeaders(BASE + "/") }, 1, 12000);
+          if (fresh.status < 400) {
+            page.html = await fresh.text();
+            activeCsrf = csrfOf(page.html) || activeCsrf;
+            page.csrf = activeCsrf;
+          }
+        } catch (e) {}
+      }
+      if ((sr.status === 404 || sr.status === 419) && attempt === 2) return "";
       continue;
     }
     await sleep(1500);
@@ -677,14 +712,14 @@ function rc4Decode(cipher, key) {
   return out;
 }
 
-async function resolveVidea(embedUrl) {
+async function resolveVideaOnce(embedUrl, pageRef) {
   const headers = {
     "User-Agent": UA_STR,
-    Referer: BASE + "/",
+    Referer: pageRef || BASE + "/",
     "Accept-Language": LANG,
     Accept: "text/html,*/*;q=0.8",
   };
-  const player = await fx(embedUrl, { headers }, 2, 25000);
+  const player = await fx(embedUrl, { headers }, 1, 10000);
   const page = await player.text();
   const nonceMatch = /_xt\s*=\s*["']([^"']+)["']/i.exec(page);
   if (player.status >= 400 || !nonceMatch) {
@@ -713,7 +748,7 @@ async function resolveVidea(embedUrl) {
   const apiUrl = originOf(embedUrl) + "/player/xml?" + q;
   let response, body = "";
   try {
-    response = await fx(apiUrl, { headers: Object.assign({}, headers, { Referer: embedUrl, Accept: "*/*" }) }, 2, 25000);
+    response = await fx(apiUrl, { headers: Object.assign({}, headers, { Referer: embedUrl, Accept: "*/*" }) }, 1, 10000);
     body = await response.text();
   } catch (e) {
     return { links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "videa xml network" };
@@ -728,7 +763,8 @@ async function resolveVidea(embedUrl) {
   }
   if (xml.indexOf("<videa_video") < 0) {
     const err = /<error\b[^>]*>([\s\S]*?)<\/error>/i.exec(xml);
-    return { links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "videa xml=" + response.status + (err ? " error" : " invalid") };
+    const deleted = err && /t.r.lt|deleted|not found/i.test(xmlUnescape(err[1]));
+    return { links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "videa xml=" + response.status + (deleted ? " deleted" : err ? " error" : " invalid") };
   }
 
   const hashes = {};
@@ -760,6 +796,21 @@ async function resolveVidea(embedUrl) {
   }
   links.sort((a, b) => (parseInt(b.quality, 10) || 0) - (parseInt(a.quality, 10) || 0));
   return { links, headers: playHeaders, info: "videa xml=" + response.status + " sources=" + links.length };
+}
+
+async function resolveVidea(embedUrl, pageRef) {
+  let last = { links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "videa unresolved" };
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    if (attempt > 1) await sleep(500);
+    try {
+      last = await resolveVideaOnce(embedUrl, pageRef);
+    } catch (e) {
+      last = { links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "videa network error" };
+    }
+    DIAG.push("videa try#" + attempt + ":" + last.info);
+    if (last.links.length || /deleted/.test(last.info)) break;
+  }
+  return last;
 }
 
 // ---------- main ----------
@@ -796,9 +847,10 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     if (!page && all.length) page = await findBySearch(all, season, episode, isMovie);
     if (!page) return fail("episode page not found");
 
-    const csrf = csrfOf(page.html);
+    let csrf = csrfOf(page.html);
     if (!csrf) return fail("no csrf token");
     const tokens = await getTokens(page, csrf);
+    csrf = page.csrf || csrf;
     if (!tokens.length) return fail("no supported servers");
 
     let opened = 0;
@@ -814,7 +866,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         if (t.label === "mediafire") {
           res = await resolveMediafire(embed);
         } else if (t.label === "videa") {
-          res = await resolveVidea(embed);
+          res = await resolveVidea(embed, page.url);
         } else {
           let eu = embed;
           if (t.label === "mp4upload" && !/\/embed-/.test(eu)) {
