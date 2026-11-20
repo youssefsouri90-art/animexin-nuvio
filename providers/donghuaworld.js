@@ -1,13 +1,18 @@
 // DonghuaWorld provider for Nuvio (QuickJS: no DOM / Node APIs).
 // Flow: TMDB title -> search donghuaworld.com -> series page (/anime/slug/)
-//       -> episode page -> Dailymotion embed -> HLS master -> quality list.
+//       -> episode pages (4K pages first) -> Dailymotion / Rumble / generic embed
+//       -> HLS master or direct files -> quality list.
 
 const BASE = "https://donghuaworld.com";
 const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
+// Desktop UA: the site says Dailymotion serves higher qualities (up to 4K)
+// to desktop clients, while mobile UAs get capped at 720p/1080p.
 const UA = {
   "User-Agent":
-    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 };
+
+const DIAG = [];
 
 // ---------- helpers ----------
 function b64decode(str) {
@@ -82,16 +87,23 @@ async function findSeries(titles, mediaType, season) {
 
 // Episode slugs look like: {name}-episode-16-4k-multi-subtitles
 // Batch posts exist too: ...-episode-34-36-multi-subtitles
-async function findEpisodeUrl(seriesUrl, episode) {
+// Returns ALL candidate pages, 4K pages first, exact before ranged.
+async function findEpisodeUrls(seriesUrl, episode) {
   const html = await getText(seriesUrl);
   const re = /href="(https:\/\/donghuaworld\.com\/[^"\/]*-episode-(\d+)(?:-(\d+))?(?:-4k)?-multi-subtitles\/)"/g;
-  let m, exact = null, ranged = null;
+  const ep = Number(episode);
+  let m;
+  const exact = [], ranged = [];
   while ((m = re.exec(html))) {
     const a = parseInt(m[2], 10), b = m[3] ? parseInt(m[3], 10) : a;
-    if (a === Number(episode) && !m[3]) exact = exact || m[1];
-    else if (Number(episode) >= a && Number(episode) <= b) ranged = ranged || m[1];
+    if (a === ep && !m[3]) exact.push(m[1]);
+    else if (ep >= a && ep <= b) ranged.push(m[1]);
   }
-  return exact || ranged;
+  const uniq = (arr) => arr.filter((u, i) => arr.indexOf(u) === i);
+  const k4 = (u) => (/-4k-/.test(u) ? 0 : 1);
+  const e = uniq(exact).sort((x, y) => k4(x) - k4(y));
+  const r = uniq(ranged).sort((x, y) => k4(x) - k4(y));
+  return e.concat(r);
 }
 
 async function findMovieUrl(seriesUrl) {
@@ -113,6 +125,8 @@ function extractEmbeds(html) {
   while ((m = dm.exec(html))) add(m[0]);
   const dm2 = /https?:\/\/(?:www\.)?dailymotion\.com\/(?:embed\/)?video\/[\w]+/g;
   while ((m = dm2.exec(html))) add(m[0]);
+  const rb = /https?:\/\/rumble\.com\/embed\/[\w]+\/?/g;
+  while ((m = rb.exec(html))) add(m[0]);
 
   // every iframe / lazy iframe
   const ifr = /<iframe[^>]+(?:src|data-src|data-lazy-src)=["']([^"']+)["']/gi;
@@ -193,8 +207,6 @@ async function expandHls(masterUrl, hdrs) {
   return out;
 }
 
-const DIAG = [];
-
 async function fetchJsonSafe(u, h) {
   try {
     const r = await fetch(u, { headers: h });
@@ -245,8 +257,7 @@ async function resolveDailymotion(url, pageUrl) {
   const H = Object.assign({}, UA, { Referer: ref, Origin: BASE, Cookie: "v1st=" + v1 + "; ts=" + ts });
   const plain = `https://www.dailymotion.com/player/metadata/video/${id}`;
 
-  // Same parameters the official embedded player sends. The player id and
-  // the dmV1st/dmTs pair decide which qualities the server hands back.
+  // Same parameters the official embedded player sends.
   const full = plain + "?" + [
     "embedder=" + encodeURIComponent(ref),
     "geo=1",
@@ -296,6 +307,39 @@ function hostOf(u) {
   return m ? m[1] : u;
 }
 
+// Rumble: embedJS API returns direct mp4/webm files per quality (+ HLS).
+async function resolveRumble(embed, pageUrl) {
+  const id = (/\/embed\/([\w]+)/.exec(embed) || [])[1];
+  if (!id) return [];
+  const H = Object.assign({}, UA, { Referer: pageUrl || BASE + "/" });
+  const txt = await getText(`https://rumble.com/embedJS/u3/?request=video&ver=2&v=${id}`, H);
+  let j;
+  try { j = JSON.parse(txt); } catch (e) { DIAG.push("rumble:badjson"); return []; }
+  const PH = Object.assign({}, UA, { Referer: "https://rumble.com/" });
+  const out = [], seen = {};
+  const add = (url, h) => {
+    if (!url || seen[url]) return;
+    seen[url] = 1;
+    out.push({ url: url, quality: qualityLabel(h), height: h, host: "Rumble", hdrs: PH });
+  };
+  ["mp4", "webm"].forEach((fmt) => {
+    const grp = j.ua && j.ua[fmt];
+    if (!grp) return;
+    Object.keys(grp).forEach((k) => {
+      const it = grp[k];
+      const h = (it && it.meta && it.meta.h) || parseInt(k, 10);
+      if (h && it && it.url) add(it.url, h);
+    });
+  });
+  const hls = j.u && j.u.hls && j.u.hls.auto && j.u.hls.auto.url;
+  if (hls) {
+    const list = await expandHls(hls, PH);
+    list.forEach((l) => { if (!seen[l.url]) { seen[l.url] = 1; l.host = "Rumble"; l.hdrs = PH; out.push(l); } });
+  }
+  DIAG.push("rumble:" + (out.map((l) => l.height).filter(Boolean).sort((x, y) => x - y).join("/") || "none"));
+  return out;
+}
+
 // Best-effort for the site's own player ("Dark Server"): fetch the player
 // page and look for HLS playlists / direct files with quality labels.
 async function resolveGeneric(embed, pageUrl) {
@@ -337,7 +381,7 @@ async function resolveGeneric(embed, pageUrl) {
   const mp = /https?:\/\/[^"'\s<>\\]+?\.(?:mp4|webm)(?:\?[^"'\s<>\\]*)?/g;
   while ((m = mp.exec(html))) push({ url: m[0], quality: "Direct", height: 0 });
 
-  // diagnostics: what does this player page look like?
+  // diagnostics
   const scripts = [];
   const sr = /<script[^>]+src=["']([^"']+)["']/gi;
   while ((m = sr.exec(raw)) && scripts.length < 3) scripts.push(hostOf(m[1]) + m[1].replace(/^https?:\/\/[^\/]+/, "").slice(0, 40));
@@ -350,8 +394,9 @@ async function resolveGeneric(embed, pageUrl) {
 async function resolve(embed, pageUrl) {
   try {
     if (/dailymotion\.com/.test(embed)) return await resolveDailymotion(embed, pageUrl);
+    if (/rumble\.com/.test(embed)) return await resolveRumble(embed, pageUrl);
     return await resolveGeneric(embed, pageUrl);
-  } catch (e) {}
+  } catch (e) { DIAG.push("resolve err " + (e && e.message)); }
   return [];
 }
 
@@ -368,30 +413,34 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     dbg.push("series=" + (series ? series.url : "none"));
     if (!series) return fail("series not found");
 
-    const pageUrl = mediaType === "tv"
-      ? await findEpisodeUrl(series.url, episode || 1)
-      : await findMovieUrl(series.url);
-    dbg.push("page=" + pageUrl);
-    if (!pageUrl) return fail("episode not found");
+    const pages = mediaType === "tv"
+      ? await findEpisodeUrls(series.url, episode || 1)
+      : [await findMovieUrl(series.url)];
+    dbg.push("pages=" + pages.length);
+    if (!pages.length) return fail("episode not found");
 
-    const embeds = extractEmbeds(await getText(pageUrl));
-    dbg.push("embeds=" + embeds.length);
-    DIAG.push("embeds[" + embeds.map(hostOf).join(",") + "]");
-    const is4kPage = /-4k-/.test(pageUrl);
     const streams = [];
-    for (const e of embeds) {
-      const links = await resolve(e, pageUrl);
-      links.sort((a, b) => b.height - a.height);
-      links.forEach((l) =>
-        streams.push({
-          name: "DonghuaWorld",
-          title: (l.host || "Dailymotion") + (is4kPage ? " [4K source]" : "") + (l.info ? " (" + l.info + ")" : ""),
-          url: l.url,
-          quality: l.quality,
-          headers: l.hdrs || UA,
-          provider: "donghuaworld",
-        })
-      );
+    let top = 0;
+    for (const pageUrl of pages) {
+      const embeds = extractEmbeds(await getText(pageUrl));
+      DIAG.push("page " + pageUrl.replace(BASE, "") + " embeds[" + embeds.map(hostOf).join(",") + "]");
+      const is4kPage = /-4k-/.test(pageUrl);
+      for (const e of embeds) {
+        const links = await resolve(e, pageUrl);
+        links.sort((a, b) => b.height - a.height);
+        links.forEach((l) => {
+          top = Math.max(top, l.height || 0);
+          streams.push({
+            name: "DonghuaWorld",
+            title: (l.host || "Dailymotion") + (is4kPage ? " [4K page]" : "") + (l.info ? " (" + l.info + ")" : ""),
+            url: l.url,
+            quality: l.quality,
+            headers: l.hdrs || UA,
+            provider: "donghuaworld",
+          });
+        });
+      }
+      if (top >= 1400) break; // got 2K/4K, no need to check other pages
     }
     if (!streams.length) return [{ name: "DEBUG " + DIAG.join(" | ").slice(0, 1200), title: dbg.concat("no playable streams").join(" > "), url: "https://debug.invalid/", quality: "debug" }];
     streams.push({ name: "INFO " + DIAG.join(" | ").slice(0, 1200), title: DIAG.join(" | ").slice(0, 1200), url: "https://debug.invalid/", quality: "info" });
