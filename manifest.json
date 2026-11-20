@@ -1,13 +1,13 @@
 {
   "name": "Animexin Nuvio",
-  "version": "1.1.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com)",
+  "version": "1.2.0",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, witanime.site)",
   "scrapers": [
     {
       "id": "animexin",
       "name": "Animexin",
       "description": "Donghua and anime (EN/ID hardsub) from animexin.dev",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "you",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/animexin.js",
@@ -18,12 +18,23 @@
       "id": "donghuaworld",
       "name": "DonghuaWorld",
       "description": "Donghua with quality options up to 4K from donghuaworld.com",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "you",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/donghuaworld.js",
       "enabled": true,
-      "formats": ["hls"]
+      "formats": ["hls", "mp4"]
+    },
+    {
+      "id": "witanime",
+      "name": "WitAnime",
+      "description": "Arabic-subbed anime from witanime.site (Dailymotion, Rumble, Dood, Mp4upload, OK.ru and more)",
+      "version": "1.0.0",
+      "author": "you",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/witanime.js",
+      "enabled": true,
+      "formats": ["hls", "mp4"]
     }
   ]
 }
