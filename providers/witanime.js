@@ -621,7 +621,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     const detail = ("WitAnime DEBUG | " + msg + (trace ? " | " + trace : "")).slice(0, 1200);
     try { console.log(detail); } catch (e) {}
     return [{
-      name: "WitAnime DEBUG",
+      name: detail,
       title: detail,
       url: "https://debug.invalid/",
       quality: "debug",
