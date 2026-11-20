@@ -25,7 +25,10 @@ const LANG = "ar,en-US;q=0.9,en;q=0.8";
 const MAX_GATES = 5;          // gates opened per request (site limit: 20/min)
 const GATE_DELAY_MS = 700;
 // Hosts we can turn into a playable link, in priority order.
-const SUPPORTED = ["mp4upload", "hgcloud"];
+// Streams: only Mp4upload is resolvable (HGCloud's page is an obfuscated JS loader we do not run).
+const SUPPORTED = ["mp4upload"];
+// FHD (1080p) is only offered through the site's "downloads" list.
+const DL_SUPPORTED = ["mp4upload", "mediafire"];
 const TAB_H = { FHD: 1080, HD: 720, SD: 480 };
 
 const DEBUG = (function () { try { return typeof process !== "undefined" && process.env && !!process.env.WITANIME_DEBUG; } catch (e) { return false; } })();
@@ -297,11 +300,21 @@ async function getTokens(page, csrf) {
       out.push({ token: p.token, label, tab, version: p.version || "sub", lang: p.lang || "", pri, h: TAB_H[tab] || 0 });
     });
   });
-  // sub first, then supported-host priority, then higher quality.
-  out.sort((a, b) => (a.version === "sub" ? 0 : 1) - (b.version === "sub" ? 0 : 1) || b.h - a.h || a.pri - b.pri);
+  const dls = (j && j.downloads) || {};
+  Object.keys(dls).forEach((tab) => {
+    (dls[tab] || []).forEach((p) => {
+      if (!p || !p.token) return;
+      const label = String(p.label || "").toLowerCase();
+      const pri = DL_SUPPORTED.indexOf(label);
+      if (pri < 0) return;
+      out.push({ token: p.token, label, tab, dl: true, version: p.version || "sub", lang: p.lang || "", pri, h: TAB_H[tab] || 0 });
+    });
+  });
+  // sub first, then higher quality, then host priority (streams before downloads).
+  out.sort((a, b) => (a.version === "sub" ? 0 : 1) - (b.version === "sub" ? 0 : 1) || b.h - a.h || (a.dl ? 1 : 0) - (b.dl ? 1 : 0) || a.pri - b.pri);
   // one entry per host+quality
   const seen = {};
-  return out.filter((t) => { const k = t.label + t.tab + t.version; if (seen[k]) return false; seen[k] = 1; return true; });
+  return out.filter((t) => { const k = t.label + t.tab + t.version + (t.dl ? "d" : "s"); if (seen[k]) return false; seen[k] = 1; return true; });
 }
 
 // Raw https GET (Node/Termux only). Returns null when require("https") is unavailable,
@@ -333,12 +346,13 @@ function gateRaw(url, headers) {
 
 // Returns the host embed URL for a token, or "". Retries the WHOLE chain (source -> wait -> gate).
 async function openGate(page, csrf, t) {
-  const gateUrl = `${BASE}/watch/stream-gate/${t.token}`;
+  const kind = t.dl ? "download" : "stream";
+  const gateUrl = `${BASE}/watch/${kind}-gate/${t.token}`;
   for (let attempt = 1; attempt <= 3; attempt++) {
     if (attempt > 1) await sleep(1200);
     let sr;
     try {
-      sr = await fx(`${BASE}/watch/stream-source/${t.token}`, { method: "POST", headers: xhrHeaders(page, csrf), body: "" }, 2);
+      sr = await fx(`${BASE}/watch/${kind}-source/${t.token}`, { method: "POST", headers: xhrHeaders(page, csrf), body: "" }, 2);
     } catch (e) { DIAG.push(t.label + " source net#" + attempt); continue; }
     if (sr.status >= 400) {
       DIAG.push(t.label + " source:" + sr.status);
@@ -348,7 +362,9 @@ async function openGate(page, csrf, t) {
     await sleep(2000);
 
     // The site's iframe: no Referer, same-origin, navigate/iframe.
-    const gh = Object.assign({}, pageHeaders("", "iframe", "same-origin"));
+    // Streams load in an iframe (no Referer). Downloads open as a top-level tab from the page.
+    const gh = t.dl ? Object.assign({}, pageHeaders(page.url, "document", "same-origin"))
+                    : Object.assign({}, pageHeaders("", "iframe", "same-origin"));
     const ck = jarHeader();
     if (ck) gh["Cookie"] = ck;
 
@@ -377,6 +393,35 @@ async function openGate(page, csrf, t) {
 }
 
 // ---------- host resolvers ----------
+function b64decode(str) {
+  if (typeof atob === "function") { try { return atob(String(str)); } catch (e) {} }
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  str = String(str).replace(/[^A-Za-z0-9+/]/g, "");
+  let out = "", bits = 0, val = 0;
+  for (let i = 0; i < str.length; i++) {
+    val = (val << 6) | chars.indexOf(str[i]);
+    bits += 6;
+    if (bits >= 8) { bits -= 8; out += String.fromCharCode((val >> bits) & 0xff); }
+  }
+  return out;
+}
+
+// Mediafire file page -> direct download URL (plain or base64 "scrambled" link).
+async function resolveMediafire(pageUrl) {
+  const r = await fx(pageUrl, { headers: { "User-Agent": UA_STR, "Accept-Language": LANG, Accept: "text/html,*/*;q=0.8" } }, 2);
+  const html = await r.text();
+  let url = "";
+  const sc = /data-scrambled-url="([^"]+)"/i.exec(html);
+  if (sc) url = b64decode(sc[1]);
+  if (!/^https?:\/\//i.test(url)) {
+    const m = /href="(https?:\/\/download[^"]*mediafire\.com[^"]+)"/i.exec(html) ||
+              /id="downloadButton"[^>]*href="(https?:\/\/[^"]+)"/i.exec(html) ||
+              /aria-label="Download file"[^>]*href="(https?:\/\/[^"]+)"/i.exec(html);
+    url = m ? m[1] : "";
+  }
+  return { links: url ? [{ url: cleanUrl(url), quality: "" }] : [], headers: { "User-Agent": UA_STR },
+           info: "mediafire http=" + r.status + " len=" + html.length + " scrambled=" + (sc ? "y" : "n") };
+}
 async function expandHls(master, hdrs) {
   const out = [{ url: master, quality: "Auto" }];
   try {
@@ -485,14 +530,24 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       try {
         const embed = await openGate(page, csrf, t);
         if (!embed) continue;
-        DIAG.push(t.label + " embed-url=" + embed.slice(0, 80));
-        const res = await resolveEmbed(embed, ["", BASE + "/"], DEBUG ? "wit_" + t.label + "_" + t.tab + ".html" : "");
+        DIAG.push(t.label + (t.dl ? " dl " : " ") + t.tab + " url=" + embed.slice(0, 100));
+        let res;
+        if (t.label === "mediafire") {
+          res = await resolveMediafire(embed);
+        } else {
+          let eu = embed;
+          if (t.label === "mp4upload" && !/\/embed-/.test(eu)) {
+            const idm = /mp4upload\.com\/(?:embed-)?([A-Za-z0-9]+)/.exec(eu);
+            if (idm) eu = "https://www.mp4upload.com/embed-" + idm[1] + ".html";
+          }
+          res = await resolveEmbed(eu, ["", BASE + "/"], DEBUG ? "wit_" + t.label + "_" + t.tab + (t.dl ? "_dl" : "") + ".html" : "");
+        }
         DIAG.push(t.label + " " + res.info + " links:" + res.links.length);
-        const host = t.label === "mp4upload" ? "Mp4upload" : "HGCloud";
+        const host = t.label === "mp4upload" ? "Mp4upload" : "Mediafire";
         res.links.forEach((l) => {
           streams.push({
             name: "WitAnime - " + host,
-            title: host + " " + t.tab + " (" + t.version + ")",
+            title: host + " " + t.tab + (t.dl ? " dl" : "") + " (" + t.version + ")",
             url: l.url,
             quality: l.quality || (t.h ? t.h + "p" : "auto"),
             headers: res.headers,
