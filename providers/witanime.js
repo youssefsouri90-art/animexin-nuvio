@@ -206,7 +206,7 @@ async function getContentTitles(contentId, mediaType) {
         `https://kitsu.io/api/edge/anime/${encodeURIComponent(kitsuId)}`,
         { headers: { Accept: "application/vnd.api+json" } },
         2,
-        12000
+        9000
       );
       const j = await r.json();
       const attrs = j && j.data && j.data.attributes;
@@ -233,22 +233,23 @@ async function getContentTitles(contentId, mediaType) {
   // Numeric and ordinary TMDB IDs continue through the existing TMDB path.
   const type = mediaType === "movie" ? "movie" : "tv";
   const out = [];
-  for (const lang of ["en-US", "ar-SA"]) {
+  const results = await Promise.all(["en-US", "ar-SA"].map(async (lang) => {
     try {
-      const r = await fx(`https://api.themoviedb.org/3/${type}/${encodeURIComponent(rawId)}?api_key=${TMDB_KEY}&language=${lang}`, {}, 2, 12000);
-      const j = await r.json();
-      [j && (j.name || j.title), j && (j.original_name || j.original_title)].forEach((t) => {
-        if (t && out.indexOf(t) < 0) out.push(t);
-      });
-    } catch (e) {}
-  }
+      const r = await fx(`https://api.themoviedb.org/3/${type}/${encodeURIComponent(rawId)}?api_key=${TMDB_KEY}&language=${lang}`, {}, 1, 9000);
+      return r.status < 400 ? await r.json() : null;
+    } catch (e) { return null; }
+  }));
+  results.forEach((j) => {
+    [j && (j.name || j.title), j && (j.original_name || j.original_title)].forEach((t) => {
+      if (t && out.indexOf(t) < 0) out.push(t);
+    });
+  });
   return out;
 }
 
 async function anilistTitles(queries, season) {
-  const out = [];
   const q = "query($s:String){Page(perPage:6){media(search:$s,type:ANIME){title{romaji english} synonyms}}}";
-  for (const text of queries.slice(0, 3)) {
+  const matches = await Promise.all(queries.slice(0, 3).map(async (text) => {
     try {
       const r = await fx(
         "https://graphql.anilist.co",
@@ -257,9 +258,10 @@ async function anilistTitles(queries, season) {
           headers: { "Content-Type": "application/json", Accept: "application/json" },
           body: JSON.stringify({ query: q, variables: { s: text } }),
         },
-        2,
-        12000
+        1,
+        9000
       );
+      if (r.status >= 400) return null;
       const j = await r.json();
       const media = (j && j.data && j.data.Page && j.data.Page.media) || [];
       let best = null;
@@ -271,17 +273,16 @@ async function anilistTitles(queries, season) {
         else if (/\b(2nd|3rd|4th|season [2-9])\b/i.test(hay)) score -= 0.2;
         if (!best || score > best.score) best = { score, m };
       });
-      if (best && best.score >= 0.5) {
-        [best.m.title && best.m.title.romaji, best.m.title && best.m.title.english].forEach((t) => {
-          if (t && out.indexOf(t) < 0) out.push(t);
-        });
-        break;
-      }
+      return best;
     } catch (e) {
       DIAG.push("anilist err");
+      return null;
     }
-  }
-  return out;
+  }));
+  let best = null;
+  matches.forEach((m) => { if (m && (!best || m.score > best.score)) best = m; });
+  if (!best || best.score < 0.5) return [];
+  return [best.m.title && best.m.title.romaji, best.m.title && best.m.title.english].filter(Boolean);
 }
 
 const slugify = (t) =>
@@ -306,11 +307,21 @@ function slugCandidates(titles, season) {
   return out.slice(0, 8);
 }
 
+async function trySlugCandidates(slugs, episode, isMovie) {
+  // Probe a few likely slugs together instead of waiting on each miss serially.
+  for (let i = 0; i < slugs.length; i += 3) {
+    const batch = slugs.slice(i, i + 3);
+    const pages = await Promise.all(batch.map((slug) => tryWatch(slug, episode, isMovie)));
+    for (let j = 0; j < pages.length; j++) if (pages[j]) return pages[j];
+  }
+  return null;
+}
+
 // ---------- site ----------
 async function tryWatch(slug, episode, isMovie) {
   const url = isMovie ? `${BASE}/watch/movie/${slug}` : `${BASE}/watch/${slug}/${episode}`;
   try {
-    const r = await fx(url, { headers: pageHeaders(BASE + "/") });
+    const r = await fx(url, { headers: pageHeaders(BASE + "/") }, 1, 10000);
     const html = await r.text();
     const bad = (r.status && r.status >= 400) || html.length < 1500 || /data-status="404"/.test(html);
     DIAG.push("try " + slug + ":" + (r.status || "?") + (bad ? ":x" : ":ok"));
@@ -324,7 +335,7 @@ async function tryWatch(slug, episode, isMovie) {
 async function search(query) {
   let html = "";
   try {
-    html = await (await fx(`${BASE}/search?q=${encodeURIComponent(query)}`, { headers: pageHeaders(BASE + "/") })).text();
+    html = await (await fx(`${BASE}/search?q=${encodeURIComponent(query)}`, { headers: pageHeaders(BASE + "/") }, 1, 10000)).text();
   } catch (e) {
     return [];
   }
@@ -357,14 +368,20 @@ async function findBySearch(titles, season, episode, isMovie) {
     if (season > 1) queries.push(`${t} ${ORD[season] || season} season`);
     queries.push(t);
   });
+  const uniqueQueries = queries.filter((q, i) => queries.findIndex((x) => x.toLowerCase() === q.toLowerCase()) === i).slice(0, 5);
   let best = null;
-  for (const q of queries.slice(0, 5)) {
-    for (const r of await search(q)) {
-      if (isMovie ? r.kind !== "movie" : r.kind === "movie") continue;
-      let score = Math.max(similarity(q, r.title), similarity(q, r.slugTitle));
-      if (season > 1 && seasonRe(season).test(r.title + " " + r.slugTitle)) score += 0.3;
-      if (!best || score > best.score) best = Object.assign({ score }, r);
-    }
+  for (let i = 0; i < uniqueQueries.length; i += 3) {
+    const batch = uniqueQueries.slice(i, i + 3);
+    const resultSets = await Promise.all(batch.map((q) => search(q)));
+    resultSets.forEach((results, n) => {
+      const q = batch[n];
+      for (const r of results) {
+        if (isMovie ? r.kind !== "movie" : r.kind === "movie") continue;
+        let score = Math.max(similarity(q, r.title), similarity(q, r.slugTitle));
+        if (season > 1 && seasonRe(season).test(r.title + " " + r.slugTitle)) score += 0.3;
+        if (!best || score > best.score) best = Object.assign({ score }, r);
+      }
+    });
     if (best && best.score >= 0.8) break;
   }
   if (!best || best.score < 0.5) return null;
@@ -522,7 +539,7 @@ async function openGate(page, csrf, t) {
       if ((sr.status === 404 || sr.status === 419) && attempt === 2) return "";
       continue;
     }
-    await sleep(1500);
+    await sleep(attempt === 1 ? 1000 : 1500);
 
     const gh = t.dl
       ? Object.assign({}, pageHeaders(page.url, "document", "same-origin"))
@@ -770,10 +787,13 @@ async function resolveVideaOnce(embedUrl, pageRef) {
     if (!xs) return { links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "videa xml=" + response.status + " no xs" };
     xml = rc4Decode(b64decode(body), token.slice(16) + seed + xs);
   }
+  const err = /<error\b[^>]*>([\s\S]*?)<\/error>/i.exec(xml);
+  if (err) {
+    const deleted = /t.r.lt|deleted|not found/i.test(xmlUnescape(err[1]));
+    return { links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "videa xml=" + response.status + (deleted ? " deleted" : " error") };
+  }
   if (xml.indexOf("<videa_video") < 0) {
-    const err = /<error\b[^>]*>([\s\S]*?)<\/error>/i.exec(xml);
-    const deleted = err && /t.r.lt|deleted|not found/i.test(xmlUnescape(err[1]));
-    return { links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "videa xml=" + response.status + (deleted ? " deleted" : err ? " error" : " invalid") };
+    return { links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "videa xml=" + response.status + " invalid" };
   }
 
   const hashes = {};
@@ -845,12 +865,16 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       page = await tryWatch(String(tmdbId).slice(5), episode, isMovie);
     } else {
       const titles = await getContentTitles(tmdbId, mediaType);
-      const romaji = await anilistTitles(titles, season);
-      all = romaji.concat(titles.filter((t) => romaji.indexOf(t) < 0));
-      DIAG.push("titles=" + all.join("|"));
-      for (const slug of slugCandidates(all, season)) {
-        page = await tryWatch(slug, episode, isMovie);
-        if (page) break;
+      all = titles.slice();
+      DIAG.push("titles=" + titles.join("|"));
+      page = await trySlugCandidates(slugCandidates(titles, season), episode, isMovie);
+      if (!page && titles.length) {
+        const romaji = await anilistTitles(titles, season);
+        all = all.concat(romaji.filter((t) => all.indexOf(t) < 0));
+        DIAG.push("aliases=" + romaji.join("|"));
+        const originalSlugs = slugCandidates(titles, season);
+        const extraSlugs = slugCandidates(romaji, season).filter((s) => originalSlugs.indexOf(s) < 0);
+        page = await trySlugCandidates(extraSlugs, episode, isMovie);
       }
     }
     if (!page && all.length) page = await findBySearch(all, season, episode, isMovie);
