@@ -22,22 +22,23 @@ const UA_DM = {
 // Set ONLY_PRIORITY_HOSTS to true to ignore every host that is not listed here.
 const ONLY_PRIORITY_HOSTS = false;
 const PRIORITY = [
+  { key: "Mp4upload", re: /mp4upload\.com/i },
+  { key: "HGCloud", re: /hgcloud|hglink|hgplay/i },
   { key: "Dailymotion", re: /dailymotion\.com|dai\.ly/i },
   { key: "Rumble", re: /rumble\.com/i },
   { key: "Dood", re: /dood|d000d|ds2play|dsvplay|d0o0d|do7go/i },
-  { key: "Mp4upload", re: /mp4upload\.com/i },
   { key: "OK.ru", re: /ok\.ru/i },
   { key: "StreamWish", re: /streamwish|wishfast|awish|hlswish|swhoi|sfastwish|strwish/i },
   { key: "VidHide", re: /vidhide|filelions|vidhidepro|ahvsh|dhcplay/i },
   { key: "Uqload", re: /uqload/i },
   { key: "YourUpload", re: /yourupload\.com/i },
-  { key: "Videa", re: /videa\.hu/i },
   { key: "Voe", re: /voe\.sx|voe-/i },
   { key: "Streamtape", re: /streamtape|strtape|stape/i },
   { key: "Mixdrop", re: /mixdrop|mxdrop/i },
   { key: "Sibnet", re: /sibnet\.ru/i },
+  { key: "Mediafire", re: /mediafire\.com/i },
 ];
-const SKIP = /(histats|google|gstatic|facebook|twitter|t\.me|whatsapp|gravatar|wp-content|wp-json|wp-includes|disqus|cloudflare|jquery|bootstrap|fontawesome|schema\.org|w3\.org|youtube\.com\/(?:channel|c\/|@)|instagram|tiktok|discord|telegram|mega\.nz|drive\.google|mediafire|1fichier|\.(?:png|jpe?g|gif|webp|svg|ico|css|js|woff2?|ttf)(?:\?|$))/i;
+const SKIP = /(histats|google|gstatic|facebook|twitter|t\.me|whatsapp|gravatar|wp-content|wp-json|wp-includes|disqus|cloudflare|jquery|bootstrap|fontawesome|schema\.org|w3\.org|youtube\.com\/(?:channel|c\/|@)|instagram|tiktok|discord|telegram|mega\.nz|mega\.io|drive\.google|1fichier|workupload|gofile|\.(?:png|jpe?g|gif|webp|svg|ico|css|js|woff2?|ttf)(?:\?|$))/i;
 
 const DIAG = [];
 
@@ -267,57 +268,99 @@ function kindOf(url) {
   return { key: hostOf(url).replace(/^www\./, ""), prio: PRIORITY.length };
 }
 
+// The page offers SD / HD / FHD tabs; each tab has its own server links.
+const TAB_H = { FHD: 1080, "1080": 1080, "1080P": 1080, HD: 720, "720": 720, "720P": 720, SD: 480, "480": 480, "480P": 480 };
+
+function normalizeText(html) {
+  return String(html)
+    .replace(/\\u002F/gi, "/").replace(/\\u0026/gi, "&").replace(/\\u003D/gi, "=")
+    .replace(/\\\//g, "/").replace(/\\"/g, '"').replace(/&amp;/g, "&");
+}
+
+// look around an URL for a quality tag (FHD/HD/SD/1080p...)
+function tabNear(text, idx) {
+  const win = text.slice(Math.max(0, idx - 260), idx + 160);
+  const re = /["'>:\s](FHD|HD|SD|1080p?|720p?|480p?)["'<\s,}]/gi;
+  let m, best = null, bestD = 1e9;
+  while ((m = re.exec(win))) {
+    const d = Math.abs(m.index - 260);
+    if (d < bestD) { bestD = d; best = m[1].toUpperCase(); }
+  }
+  return best && TAB_H[best] ? best : "";
+}
+
 function extractServers(html) {
   const out = [], seen = {};
-  const add = (u) => {
+  const text = normalizeText(html);
+  const add = (u, tab) => {
     u = cleanUrl(u);
     if (!/^https?:\/\//i.test(u)) return;
     if (u.indexOf(hostOf(BASE)) >= 0 && !/embed|player/i.test(u)) return; // site's own pages
     if (SKIP.test(u)) return;
-    if (seen[u]) return;
-    seen[u] = 1;
+    const key = u + "|" + (tab || "");
+    if (seen[key]) return;
+    seen[key] = 1;
     const k = kindOf(u);
     if (ONLY_PRIORITY_HOSTS && k.prio >= PRIORITY.length) return;
-    out.push({ url: u, kind: k.key, prio: k.prio });
+    out.push({ url: u, kind: k.key, prio: k.prio, tab: tab || "" });
   };
   let m;
 
   // 1) iframes (also lazy ones)
   const ifr = /<iframe[^>]+(?:src|data-src|data-lazy-src)=["']([^"']+)["']/gi;
-  while ((m = ifr.exec(html))) add(m[1]);
+  while ((m = ifr.exec(text))) add(m[1], tabNear(text, m.index));
 
   // 2) data-* attributes holding an URL (server buttons)
   const du = /data-[\w-]*(?:url|src|embed|link|video|server)[\w-]*=["']((?:https?:)?\/\/[^"']+)["']/gi;
-  while ((m = du.exec(html))) add(m[1]);
+  while ((m = du.exec(text))) add(m[1], tabNear(text, m.index));
 
-  // 3) URLs of known hosts anywhere in the page (scripts / JSON)
-  const kh = /https?:\\?\/\\?\/[^"'\s<>\\]+/g;
-  while ((m = kh.exec(html))) {
+  // 3) URLs of known hosts anywhere (HTML, inline JSON, Next.js payloads)
+  const kh = /https?:\/\/[^"'\s<>\\]+/g;
+  while ((m = kh.exec(text))) {
     const u = cleanUrl(m[0]);
-    if (PRIORITY.some((p) => p.re.test(u))) add(u);
+    if (PRIORITY.some((p) => p.re.test(u))) add(u, tabNear(text, m.index));
   }
 
   // 4) base64 blobs (value=, data-*=, JS strings): decode, then scan for URLs / iframes.
   const blob = /["']([A-Za-z0-9+/_\-]{40,}={0,2})["']/g;
   let n = 0;
-  while ((m = blob.exec(html)) && n < 60) {
+  while ((m = blob.exec(text)) && n < 60) {
     n++;
-    let d = b64decode(m[1]);
-    if (!/https?:|<iframe|\\\//i.test(d)) {
-      // some themes reverse the string before encoding
+    let dd = b64decode(m[1]);
+    if (!/https?:|<iframe|\\\//i.test(dd)) {
       const rev = b64decode(m[1].split("").reverse().join(""));
-      if (/https?:|<iframe/i.test(rev)) d = rev; else continue;
+      if (/https?:|<iframe/i.test(rev)) dd = rev; else continue;
     }
-    d = safeDecode(d);
+    dd = normalizeText(safeDecode(dd));
+    const tab = tabNear(text, m.index);
     const f = /<iframe[^>]+src=["']([^"']+)["']/gi;
     let x;
-    while ((x = f.exec(d))) add(x[1]);
-    const u = /https?:\\?\/\\?\/[^"'\s<>\\]+/g;
-    while ((x = u.exec(d))) add(x[0]);
+    while ((x = f.exec(dd))) add(x[1], tab);
+    const u = /https?:\/\/[^"'\s<>\\]+/g;
+    while ((x = u.exec(dd))) add(x[0], tab);
   }
 
-  out.sort((a, b) => a.prio - b.prio);
+  out.sort((a, b) => (a.prio - b.prio) || ((TAB_H[b.tab] || 0) - (TAB_H[a.tab] || 0)));
   return out;
+}
+
+// what the page looks like, for the DEBUG card when nothing was found
+function pageDiag(html) {
+  const t = String(html);
+  const cnt = (re) => (t.match(re) || []).length;
+  const api = [], seenA = {};
+  const ar = /["'(](\/(?:api|wp-json|ajax|_next\/data)[\w\/\-\.?=&%]*)/g;
+  let m;
+  while ((m = ar.exec(t)) && api.length < 5) if (!seenA[m[1]]) { seenA[m[1]] = 1; api.push(m[1].slice(0, 60)); }
+  const js = [], sr = /<script[^>]+src=["']([^"']+)["']/gi;
+  while ((m = sr.exec(t)) && js.length < 4) js.push(m[1].replace(/^https?:\/\/[^\/]+/, "").slice(0, 40));
+  DIAG.push("pg:len=" + t.length +
+    " next=" + (/__NEXT_DATA__|__next_f/.test(t) ? 1 : 0) +
+    " mp4up=" + cnt(/mp4upload/gi) + " hgc=" + cnt(/hgcloud/gi) + " videa=" + cnt(/videa/gi) +
+    " iframe=" + cnt(/<iframe/gi) + " b64=" + cnt(/["'][A-Za-z0-9+\/]{60,}={0,2}["']/g));
+  if (api.length) DIAG.push("api:" + api.join(","));
+  if (js.length) DIAG.push("js:" + js.join(","));
+  DIAG.push("body[" + t.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 160) + "]");
 }
 
 // ---------- quality handling ----------
@@ -546,7 +589,7 @@ async function resolveGeneric(embed, pageUrl) {
   packed.forEach((p) => { html += "\n" + unpack(p); });
   html = html.replace(/\\\//g, "/").replace(/&amp;/g, "&");
 
-  const PH = Object.assign({}, UA, { Referer: embed, Origin: origin });
+  const PH = Object.assign({}, UA, { Referer: /mp4upload/i.test(embed) ? "https://www.mp4upload.com/" : embed, Origin: origin });
   const out = [], seen = {};
   const push = (l) => { if (!seen[l.url]) { seen[l.url] = 1; l.hdrs = PH; out.push(l); } };
   let m;
@@ -586,16 +629,32 @@ async function resolveGeneric(embed, pageUrl) {
   return out;
 }
 
+// ---------- Mediafire (direct link on the file page) ----------
+async function resolveMediafire(url) {
+  const html = await getText(url, { Referer: "https://www.mediafire.com/" });
+  const m = /href="(https?:\/\/download[^"]*mediafire\.com\/[^"]+)"/i.exec(html) ||
+    /data-scrambled-url="([A-Za-z0-9+/=]+)"/.exec(html);
+  if (!m) { DIAG.push("mediafire:nolink"); return []; }
+  const u = /^https?:/i.test(m[1]) ? m[1] : b64decode(m[1]);
+  DIAG.push("mediafire:ok");
+  return [{ url: u, quality: "Direct", height: 0, hdrs: Object.assign({}, UA, { Referer: "https://www.mediafire.com/" }) }];
+}
+
 async function resolve(server, pageUrl) {
   const u = server.url;
+  let links = [];
   try {
-    if (/dailymotion\.com|dai\.ly/i.test(u)) return await resolveDailymotion(u, pageUrl);
-    if (/rumble\.com/i.test(u)) return await resolveRumble(u, pageUrl);
-    if (PRIORITY[2].re.test(u)) return await resolveDood(u, pageUrl);
-    if (/ok\.ru/i.test(u)) return await resolveOkru(u);
-    return await resolveGeneric(u, pageUrl);
+    if (/dailymotion\.com|dai\.ly/i.test(u)) links = await resolveDailymotion(u, pageUrl);
+    else if (/rumble\.com/i.test(u)) links = await resolveRumble(u, pageUrl);
+    else if (/dood|d000d|ds2play|dsvplay|d0o0d|do7go/i.test(u)) links = await resolveDood(u, pageUrl);
+    else if (/ok\.ru/i.test(u)) links = await resolveOkru(u);
+    else if (/mediafire\.com/i.test(u)) links = await resolveMediafire(u);
+    else links = await resolveGeneric(u, pageUrl);
   } catch (e) { DIAG.push(server.kind + " err " + (e && e.message)); }
-  return [];
+  // single-quality hosts: the tab (SD/HD/FHD) on the site tells the quality
+  const th = TAB_H[server.tab];
+  if (th) links.forEach((l) => { if (!l.height) { l.height = th; l.quality = qualityLabel(th); } });
+  return links;
 }
 
 // ---------- entry point ----------
@@ -626,9 +685,9 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     const html = found.html;
     dbg.push("ep=" + pageUrl);
 
-    const servers = extractServers(html).slice(0, 8);
-    dbg.push("servers=" + servers.length + "[" + servers.map((s) => s.kind).join(",") + "]");
-    if (!servers.length) dbg.push("html=" + html.length);
+    const servers = extractServers(html).slice(0, 12);
+    dbg.push("servers=" + servers.length + "[" + servers.map((s) => s.kind + (s.tab ? ":" + s.tab : "")).join(",") + "]");
+    if (!servers.length) pageDiag(html);
 
     const results = await Promise.all(
       servers.map(async (s) => ({ s, links: await resolve(s, pageUrl) }))
@@ -639,7 +698,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       links.forEach((l) =>
         streams.push({
           name: "WitAnime",
-          title: s.kind + (l.info ? " (" + l.info + ")" : ""),
+          title: s.kind + (s.tab ? " " + s.tab : "") + (l.info ? " (" + l.info + ")" : ""),
           url: l.url,
           quality: l.quality,
           headers: l.hdrs || UA,
