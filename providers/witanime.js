@@ -198,16 +198,32 @@ async function getTmdbTitles(tmdbId, mediaType) {
   const out = [];
   for (const lang of ["en-US", "ar-SA"]) {
     try {
-      const r = await fx(`https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${TMDB_KEY}&language=${lang}`, {}, 2, 12000);
-      const j = await r.json();
-      [j.name || j.title, j.original_name || j.original_title].forEach((t) => {
-        if (t && out.indexOf(t) < 0) out.push(t);
+      const url = `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${TMDB_KEY}&language=${lang}`;
+      const r = await fx(url, {}, 2, 12000);
+      const text = await r.text();
+      let j;
+      try {
+        j = JSON.parse(text);
+      } catch (parseError) {
+        DIAG.push("TMDB " + lang + " HTTP " + r.status + " invalid-json len=" + text.length + " body=" + text.slice(0, 90).replace(/\s+/g, " "));
+        continue;
+      }
+      if (r.status >= 400) {
+        const reason = j && (j.status_message || j.message) || text.slice(0, 100).replace(/\s+/g, " ");
+        DIAG.push("TMDB " + lang + " HTTP " + r.status + " " + reason);
+        continue;
+      }
+      const found = [j && (j.name || j.title), j && (j.original_name || j.original_title)].filter(Boolean);
+      DIAG.push("TMDB " + lang + " HTTP " + r.status + " titles=" + (found.join("/") || "none"));
+      found.forEach((t) => {
+        if (out.indexOf(t) < 0) out.push(t);
       });
-    } catch (e) {}
+    } catch (e) {
+      DIAG.push("TMDB " + lang + " error=" + String(e && e.message || e).slice(0, 100));
+    }
   }
   return out;
 }
-
 async function anilistTitles(queries, season) {
   const out = [];
   const q = "query($s:String){Page(perPage:6){media(search:$s,type:ANIME){title{romaji english} synonyms}}}";
@@ -608,6 +624,7 @@ async function resolveEmbed(embedUrl, referers, dumpName) {
 // ---------- main ----------
 async function getStreams(tmdbId, mediaType, season, episode) {
   DIAG.length = 0;
+  DIAG.push("input id=" + String(tmdbId) + " media=" + String(mediaType));
   JAR = {};
   season = Number(season) || 1;
   episode = Number(episode) || 1;
