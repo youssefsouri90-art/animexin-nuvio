@@ -1,4 +1,4 @@
-// WitAnime provider for Nuvio (QuickJS: no DOM, no Node APIs).
+// WitAnime provider for Nuvio (QuickJS: supports TMDB and Nuvio Kitsu IDs).
 
 const BASE = "https://witanime.site";
 const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
@@ -193,14 +193,51 @@ function seasonRe(n) {
   );
 }
 
-async function getTmdbTitles(tmdbId, mediaType) {
+async function getContentTitles(contentId, mediaType) {
+  const rawId = String(contentId || "").trim();
+  const kitsuMatch = /^kitsu:(\d+)/i.exec(rawId);
+
+  // Nuvio can pass anime IDs in the form "kitsu:<animeId>:<episode>".
+  // The first number is the Kitsu anime ID; it is not a TMDB ID.
+  if (kitsuMatch) {
+    const kitsuId = kitsuMatch[1];
+    try {
+      const r = await fx(
+        `https://kitsu.io/api/edge/anime/${encodeURIComponent(kitsuId)}`,
+        { headers: { Accept: "application/vnd.api+json" } },
+        2,
+        12000
+      );
+      const j = await r.json();
+      const attrs = j && j.data && j.data.attributes;
+      const titles = (attrs && attrs.titles) || {};
+      const out = [
+        attrs && attrs.canonicalTitle,
+        titles.en,
+        titles.en_jp,
+        titles.ja_jp,
+      ].filter(Boolean);
+      const unique = out.filter((t, i) => out.indexOf(t) === i);
+      if (r.status >= 400 || !unique.length) {
+        DIAG.push("kitsu " + kitsuId + ":" + r.status + ":no titles");
+      } else {
+        DIAG.push("kitsu " + kitsuId + ":" + r.status + ":" + unique.slice(0, 3).join("|"));
+      }
+      return unique;
+    } catch (e) {
+      DIAG.push("kitsu " + kitsuId + ":err " + String(e && e.message || e).slice(0, 80));
+      return [];
+    }
+  }
+
+  // Numeric and ordinary TMDB IDs continue through the existing TMDB path.
   const type = mediaType === "movie" ? "movie" : "tv";
   const out = [];
   for (const lang of ["en-US", "ar-SA"]) {
     try {
-      const r = await fx(`https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${TMDB_KEY}&language=${lang}`, {}, 2, 12000);
+      const r = await fx(`https://api.themoviedb.org/3/${type}/${encodeURIComponent(rawId)}?api_key=${TMDB_KEY}&language=${lang}`, {}, 2, 12000);
       const j = await r.json();
-      [j.name || j.title, j.original_name || j.original_title].forEach((t) => {
+      [j && (j.name || j.title), j && (j.original_name || j.original_title)].forEach((t) => {
         if (t && out.indexOf(t) < 0) out.push(t);
       });
     } catch (e) {}
@@ -627,7 +664,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     if (String(tmdbId).indexOf("slug:") === 0) {
       page = await tryWatch(String(tmdbId).slice(5), episode, isMovie);
     } else {
-      const titles = await getTmdbTitles(tmdbId, mediaType);
+      const titles = await getContentTitles(tmdbId, mediaType);
       const romaji = await anilistTitles(titles, season);
       all = romaji.concat(titles.filter((t) => romaji.indexOf(t) < 0));
       DIAG.push("titles=" + all.join("|"));
@@ -676,6 +713,9 @@ async function getStreams(tmdbId, mediaType, season, episode) {
             headers: res.headers,
           });
         });
+        // Nuvio caps each plugin run at 60 seconds. Once a playable server is
+        // found, return its links instead of spending time probing every host.
+        if (streams.length) break;
       } catch (e) {
         DIAG.push(t.label + " err " + (e && e.message));
       }
