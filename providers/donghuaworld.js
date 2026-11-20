@@ -296,26 +296,54 @@ function hostOf(u) {
   return m ? m[1] : u;
 }
 
-// Best-effort for non-Dailymotion players: fetch the player page and look
-// for HLS playlists in it.
+// Best-effort for the site's own player ("Dark Server"): fetch the player
+// page and look for HLS playlists / direct files with quality labels.
 async function resolveGeneric(embed, pageUrl) {
   const origin = "https://" + hostOf(embed);
   const H = Object.assign({}, UA, { Referer: pageUrl || BASE + "/" });
-  const html = (await getText(embed, H)).replace(/\\\//g, "/");
-  const urls = [], seen = {};
-  let m;
-  const re = /https?:\/\/[^"'\s<>\\]+?\.m3u8[^"'\s<>\\]*/g;
-  while ((m = re.exec(html))) {
-    const u = m[0].replace(/&amp;/g, "&");
-    if (!seen[u]) { seen[u] = 1; urls.push(u); }
-  }
-  DIAG.push("gen " + embed.slice(0, 110) + " len=" + html.length + " m3u8=" + urls.length);
+  const raw = await getText(embed, H);
+  const html = raw.replace(/\\\//g, "/").replace(/&amp;/g, "&");
   const PH = Object.assign({}, UA, { Referer: embed, Origin: origin });
-  const out = [];
-  for (const u of urls.slice(0, 3)) {
-    const hls = await expandHls(u, PH);
-    hls.forEach((l) => { l.hdrs = PH; l.host = hostOf(embed); out.push(l); });
+  const out = [], seen = {};
+  const push = (l) => { if (!seen[l.url]) { seen[l.url] = 1; l.hdrs = PH; l.host = hostOf(embed); out.push(l); } };
+  let m;
+
+  // 1) HLS playlists
+  const re = /https?:\/\/[^"'\s<>\\]+?\.m3u8[^"'\s<>\\]*/g;
+  const hls = [];
+  while ((m = re.exec(html))) if (hls.indexOf(m[0]) < 0) hls.push(m[0]);
+  for (const u of hls.slice(0, 3)) {
+    const list = await expandHls(u, PH);
+    list.forEach(push);
   }
+
+  // 2) direct files with a quality label, in the common player formats
+  const lab = (v) => { const n = parseInt(v, 10); return n ? qualityLabel(n) : String(v); };
+  const pat = [
+    /["']?(?:file|src|url)["']?\s*:\s*["'](https?:[^"']+\.(?:mp4|webm|m3u8)[^"']*)["']\s*,\s*["']?(?:label|res|quality|size|title)["']?\s*:\s*["']?(\d{3,4})p?["']?/gi,
+    /["']?(?:label|res|quality|size)["']?\s*:\s*["']?(\d{3,4})p?["']?\s*,\s*["']?(?:file|src|url)["']?\s*:\s*["'](https?:[^"']+)["']/gi,
+    /<source[^>]+src=["'](https?:[^"']+)["'][^>]*(?:size|res|label|title|data-res)=["'](\d{3,4})p?["']/gi,
+    /<source[^>]+(?:size|res|label|title|data-res)=["'](\d{3,4})p?["'][^>]*src=["'](https?:[^"']+)["']/gi,
+  ];
+  pat.forEach((r, idx) => {
+    while ((m = r.exec(html))) {
+      const swap = idx === 1 || idx === 3;
+      const url = swap ? m[2] : m[1], q = swap ? m[1] : m[2];
+      push({ url: url, quality: lab(q), height: parseInt(q, 10) || 0 });
+    }
+  });
+
+  // 3) any other direct video file
+  const mp = /https?:\/\/[^"'\s<>\\]+?\.(?:mp4|webm)(?:\?[^"'\s<>\\]*)?/g;
+  while ((m = mp.exec(html))) push({ url: m[0], quality: "Direct", height: 0 });
+
+  // diagnostics: what does this player page look like?
+  const scripts = [];
+  const sr = /<script[^>]+src=["']([^"']+)["']/gi;
+  while ((m = sr.exec(raw)) && scripts.length < 3) scripts.push(hostOf(m[1]) + m[1].replace(/^https?:\/\/[^\/]+/, "").slice(0, 40));
+  DIAG.push("gen " + embed.slice(0, 110) + " len=" + raw.length + " found=" + out.length);
+  DIAG.push("page[" + raw.replace(/\s+/g, " ").slice(0, 260) + "]");
+  if (scripts.length) DIAG.push("js:" + scripts.join(","));
   return out;
 }
 
@@ -365,8 +393,8 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         })
       );
     }
-    if (!streams.length) return [{ name: "DEBUG " + DIAG.join(" | ").slice(0, 700), title: dbg.concat("no playable streams").join(" > "), url: "https://debug.invalid/", quality: "debug" }];
-    streams.push({ name: "INFO " + DIAG.join(" | ").slice(0, 700), title: DIAG.join(" | ").slice(0, 700), url: "https://debug.invalid/", quality: "info" });
+    if (!streams.length) return [{ name: "DEBUG " + DIAG.join(" | ").slice(0, 1200), title: dbg.concat("no playable streams").join(" > "), url: "https://debug.invalid/", quality: "debug" }];
+    streams.push({ name: "INFO " + DIAG.join(" | ").slice(0, 1200), title: DIAG.join(" | ").slice(0, 1200), url: "https://debug.invalid/", quality: "info" });
     return streams;
   } catch (err) {
     return fail("ERROR " + (err && err.message));
