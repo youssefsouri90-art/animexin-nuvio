@@ -1,4 +1,4 @@
-// WitAnime fast diagnostic build for Nuvio (max ~12s)
+// WitAnime fast diagnostic build for Nuvio (reads DIAG in quality line)
 const BASE = "https://witanime.site";
 const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
 
@@ -7,8 +7,6 @@ const UA_STR =
 const LANG = "ar,en-US;q=0.9,en;q=0.8";
 const DIAG = [];
 let JAR = {};
-
-const sleep = (ms) => new Promise((r) => (typeof setTimeout === "function" ? setTimeout(r, ms) : r()));
 
 function withTimeout(promise, ms, label) {
   let tid = null;
@@ -77,14 +75,14 @@ async function getStreams(tmdbId, mediaType, season, episode) {
   const diagItem = (msg) => [
     {
       name: "WitAnime DIAG",
-      quality: "debug",
+      quality: msg + " | " + DIAG.slice(-4).join(" > "),
       title: msg + " | " + DIAG.join(" > "),
       url: BASE + "/",
     },
   ];
 
   const run = async () => {
-    DIAG.push("start:" + tmdbId + ":" + mediaType + ":s" + season + "e" + episode);
+    DIAG.push("id:" + tmdbId + ":" + mediaType + ":s" + season + "e" + episode);
 
     let titles = [];
     if (String(tmdbId).indexOf("slug:") === 0) {
