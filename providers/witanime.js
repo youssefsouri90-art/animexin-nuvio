@@ -618,13 +618,14 @@ async function getStreams(tmdbId, mediaType, season, episode) {
   // returning an empty array. Its title contains the failure stage and trace.
   const fail = (msg) => {
     const trace = DIAG.join(" > ");
-    const detail = ("WitAnime DEBUG | " + msg + (trace ? " | " + trace : "")).slice(0, 1200);
+    const detail = ("WitAnime DEBUG | " + msg + (trace ? " | " + trace : "")).slice(0, 500);
     try { console.log(detail); } catch (e) {}
     return [{
       name: detail,
       title: detail,
       url: "https://debug.invalid/",
-      quality: "debug",
+      // Nuvio renders quality as the stream subtitle; put the diagnostic there.
+      quality: detail,
     }];
   };
 
@@ -700,3 +701,9 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
 if (typeof module !== "undefined" && module.exports) module.exports = { getStreams };
 else if (typeof globalThis !== "undefined") globalThis.getStreams = getStreams;
+
+
+
+
+
+
