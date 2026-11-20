@@ -1,0 +1,18 @@
+{
+  "name": "Animexin Nuvio",
+  "version": "1.0.0",
+  "description": "Donghua & anime streams from animexin.dev",
+  "scrapers": [
+    {
+      "id": "animexin",
+      "name": "Animexin",
+      "description": "Donghua and anime (EN/ID hardsub) from animexin.dev",
+      "version": "1.0.0",
+      "author": "you",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/animexin.js",
+      "enabled": true,
+      "formats": ["hls", "mp4"]
+    }
+  ]
+}
