@@ -16,8 +16,8 @@ const MAX_GATES = 5;
 const GATE_DELAY_MS = 400;
 const FETCH_TIMEOUT_MS = 25000;
 
-// Watch hosts expanded with servers seen on WitAnime watch page
-const SUPPORTED = ["mp4upload", "yourupload", "yonaplay", "videa"];
+// Prefer Videa, the server most frequently used on the current WitAnime pages.
+const SUPPORTED = ["videa", "yourupload", "mp4upload", "yonaplay"];
 const DL_SUPPORTED = ["mp4upload", "mediafire"];
 const TAB_H = { FHD: 1080, HD: 720, SD: 480 };
 
@@ -642,6 +642,126 @@ async function resolveEmbed(embedUrl, referers, dumpName) {
   return { links, headers: play, info };
 }
 
+function xmlUnescape(s) {
+  return String(s || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;|&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function xmlAttr(attrs, name) {
+  const re = new RegExp("(?:^|\\s)" + name + "\\s*=\\s*([\"'])(.*?)\\1", "i");
+  const m = re.exec(attrs || "");
+  return m ? xmlUnescape(m[2]) : "";
+}
+
+function rc4Decode(cipher, key) {
+  const k = String(key || "");
+  if (!k) return "";
+  const S = [];
+  for (let i = 0; i < 256; i++) S[i] = i;
+  let j = 0;
+  for (let i = 0; i < 256; i++) {
+    j = (j + S[i] + k.charCodeAt(i % k.length)) % 256;
+    const t = S[i]; S[i] = S[j]; S[j] = t;
+  }
+  let i = 0; j = 0; let out = "";
+  for (let n = 0; n < cipher.length; n++) {
+    i = (i + 1) % 256;
+    j = (j + S[i]) % 256;
+    const t = S[i]; S[i] = S[j]; S[j] = t;
+    out += String.fromCharCode(cipher.charCodeAt(n) ^ S[(S[i] + S[j]) % 256]);
+  }
+  return out;
+}
+
+async function resolveVidea(embedUrl) {
+  const headers = {
+    "User-Agent": UA_STR,
+    Referer: BASE + "/",
+    "Accept-Language": LANG,
+    Accept: "text/html,*/*;q=0.8",
+  };
+  const player = await fx(embedUrl, { headers }, 2, 25000);
+  const page = await player.text();
+  const nonceMatch = /_xt\s*=\s*["']([^"']+)["']/i.exec(page);
+  if (player.status >= 400 || !nonceMatch) {
+    return { links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "videa player=" + player.status + " nonce=" + (nonceMatch ? "y" : "n") };
+  }
+
+  const secret = "xHb0ZvME5q8CBcoQi6AngerDu3FGO9fkUlwPmLVY_RTzj2hJIS4NasXWKy1td7p";
+  const nonce = nonceMatch[1];
+  const left = nonce.slice(0, 32), right = nonce.slice(32);
+  let token = "";
+  for (let n = 0; n < 32; n++) {
+    const pos = secret.indexOf(left.charAt(n));
+    if (pos < 0) return { links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "videa bad nonce" };
+    let idx = n - (pos - 31);
+    if (idx < 0) idx += right.length;
+    if (idx < 0 || idx >= right.length) return { links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "videa nonce index" };
+    token += right.charAt(idx);
+  }
+
+  const parts = String(embedUrl).split("?");
+  const rawQuery = (parts[1] || "").split("#")[0].replace(/(^|&)_s=[^&]*/g, "").replace(/(^|&)_t=[^&]*/g, "").replace(/^&+|&+$/g, "");
+  let seed = "";
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  for (let n = 0; n < 8; n++) seed += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+  const q = (rawQuery ? rawQuery + "&" : "") + "_s=" + encodeURIComponent(seed) + "&_t=" + encodeURIComponent(token.slice(0, 16));
+  const apiUrl = originOf(embedUrl) + "/player/xml?" + q;
+  let response, body = "";
+  try {
+    response = await fx(apiUrl, { headers: Object.assign({}, headers, { Referer: embedUrl, Accept: "*/*" }) }, 2, 25000);
+    body = await response.text();
+  } catch (e) {
+    return { links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "videa xml network" };
+  }
+
+  let xml = body.trim();
+  if (xml.indexOf("<videa_video") < 0 && xml.indexOf("<?xml") < 0) {
+    let xs = "";
+    try { xs = response.headers && typeof response.headers.get === "function" ? (response.headers.get("x-videa-xs") || "") : ""; } catch (e) {}
+    if (!xs) return { links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "videa xml=" + response.status + " no xs" };
+    xml = rc4Decode(b64decode(body), token.slice(16) + seed + xs);
+  }
+  if (xml.indexOf("<videa_video") < 0) {
+    const err = /<error\b[^>]*>([\s\S]*?)<\/error>/i.exec(xml);
+    return { links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info: "videa xml=" + response.status + (err ? " error" : " invalid") };
+  }
+
+  const hashes = {};
+  const hashRe = /<hash_value_([^>]+)>([\s\S]*?)<\/hash_value_\1>/gi;
+  let hm;
+  while ((hm = hashRe.exec(xml))) hashes[hm[1]] = xmlUnescape(hm[2].trim());
+
+  const playHeaders = { "User-Agent": UA_STR, Referer: originOf(embedUrl) + "/" };
+  const links = [];
+  const srcRe = /<video_source\b([^>]*)>([\s\S]*?)<\/video_source>/gi;
+  let sm;
+  while ((sm = srcRe.exec(xml))) {
+    const name = xmlAttr(sm[1], "name");
+    let url = xmlUnescape(sm[2].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").trim());
+    if (!url || !name) continue;
+    if (url.indexOf("//") === 0) url = "https:" + url;
+    else if (url[0] === "/") url = originOf(embedUrl) + url;
+    const expiry = xmlAttr(sm[1], "exp");
+    if (hashes[name] && expiry) url += (url.indexOf("?") >= 0 ? "&" : "?") + "md5=" + encodeURIComponent(hashes[name]) + "&expires=" + encodeURIComponent(expiry);
+    if (!isPlayableMediaUrl(url)) continue;
+    const height = parseInt(xmlAttr(sm[1], "height"), 10) || 0;
+    if (/\.m3u8(?:[?#]|$)/i.test(url)) {
+      const expanded = await expandHls(url, playHeaders);
+      if (expanded.length) expanded.forEach((l) => links.push(l));
+      else links.push({ url, quality: height ? height + "p" : "Auto" });
+    } else {
+      links.push({ url, quality: height ? height + "p" : "" });
+    }
+  }
+  links.sort((a, b) => (parseInt(b.quality, 10) || 0) - (parseInt(a.quality, 10) || 0));
+  return { links, headers: playHeaders, info: "videa xml=" + response.status + " sources=" + links.length };
+}
+
 // ---------- main ----------
 async function getStreams(tmdbId, mediaType, season, episode) {
   DIAG.length = 0;
@@ -693,6 +813,8 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         let res;
         if (t.label === "mediafire") {
           res = await resolveMediafire(embed);
+        } else if (t.label === "videa") {
+          res = await resolveVidea(embed);
         } else {
           let eu = embed;
           if (t.label === "mp4upload" && !/\/embed-/.test(eu)) {
@@ -707,7 +829,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
           if (!isPlayableMediaUrl(l.url)) return;
           streams.push({
             name: "WitAnime - " + host,
-            title: host + " " + t.tab + (t.dl ? " dl" : "") + " (" + t.version + ")",
+            title: host + " " + (t.label === "videa" && l.quality ? l.quality : t.tab) + (t.dl ? " dl" : "") + " (" + t.version + ")",
             url: l.url,
             quality: l.quality || (t.h ? t.h + "p" : "auto"),
             headers: res.headers,
