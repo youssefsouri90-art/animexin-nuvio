@@ -1,13 +1,31 @@
 // Animexin provider for Nuvio (QuickJS runtime: no DOM, no Node APIs).
 // Flow: TMDB title -> search animexin.dev -> episode page -> decode server
-// <option> values (base64 iframe) -> resolve host -> direct m3u8/mp4.
+// <option> values (base64 iframe) -> keep ONLY the allowed servers
+// (Dailymotion AX / Rumble AX / Dood AX) -> resolve -> quality list.
 
 const BASE = "https://animexin.dev";
 const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
+
+// Site / TMDB / Rumble / Dood: mobile UA (works with the site).
 const UA = {
   "User-Agent":
     "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
 };
+// Dailymotion only: desktop UA (Dailymotion serves higher qualities to desktop).
+const UA_DM = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+};
+
+// Allowed servers, in priority order. Matched against the option label first,
+// then against the iframe URL. Everything else is ignored.
+const ALLOWED = [
+  { key: "Dailymotion", label: /dailymotion/i, url: /dailymotion\.com/i },
+  { key: "Rumble", label: /rumble/i, url: /rumble\.com/i },
+  { key: "Dood", label: /dood/i, url: /dood|d000d|ds2play|dsvplay|d0o0d|do7go|vide0\.net/i },
+];
+
+const DIAG = [];
 
 // ---------- helpers ----------
 function b64decode(str) {
@@ -17,10 +35,7 @@ function b64decode(str) {
   for (let i = 0; i < str.length; i++) {
     val = (val << 6) | chars.indexOf(str[i]);
     bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      out += String.fromCharCode((val >> bits) & 0xff);
-    }
+    if (bits >= 8) { bits -= 8; out += String.fromCharCode((val >> bits) & 0xff); }
   }
   return out;
 }
@@ -39,6 +54,24 @@ function similarity(a, b) {
 async function getText(url, headers) {
   const r = await fetch(url, { headers: Object.assign({}, UA, headers || {}) });
   return await r.text();
+}
+
+function hostOf(u) {
+  const m = /^https?:\/\/([^\/?#]+)/i.exec(u);
+  return m ? m[1] : u;
+}
+
+function randHex(n) {
+  let s = "";
+  while (s.length < n) s += Math.floor(Math.random() * 16).toString(16);
+  return s.toUpperCase();
+}
+
+function randAlnum(n) {
+  const c = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let s = "";
+  for (let i = 0; i < n; i++) s += c.charAt(Math.floor(Math.random() * c.length));
+  return s;
 }
 
 // ---------- TMDB ----------
@@ -104,60 +137,252 @@ function extractServers(html) {
     if (!m[1] || m[1].length < 20) continue;
     const decoded = b64decode(m[1]);
     const src = /<iframe[^>]+src=["']([^"']+)["']/i.exec(decoded);
-    if (src) servers.push({ label: m[2].trim(), url: src[1].replace(/^\/\//, "https://") });
+    if (src) servers.push({ label: m[2].trim(), url: src[1].replace(/&amp;/g, "&").replace(/^\/\//, "https://") });
   }
   // fallback: default iframe in the page
   if (!servers.length) {
     const f = /<iframe[^>]+src=["']([^"']+)["']/i.exec(html);
-    if (f) servers.push({ label: "Default", url: f[1] });
+    if (f) servers.push({ label: "Default", url: f[1].replace(/&amp;/g, "&").replace(/^\/\//, "https://") });
   }
   return servers;
 }
 
-// ---------- resolvers ----------
-async function resolveDailymotion(url) {
-  const id = (/[?&]video=([^&]+)/.exec(url) || /\/video\/([^?_]+)/.exec(url) || [])[1];
-  if (!id) return [];
-  const j = await (await fetch(`https://www.dailymotion.com/player/metadata/video/${id}`, { headers: UA })).json();
-  const auto = j && j.qualities && j.qualities.auto && j.qualities.auto[0];
-  return auto ? [{ url: auto.url, quality: "Auto", type: "hls" }] : [];
-}
-
-async function resolveOkru(url) {
-  const id = (/videoembed\/(\d+)/.exec(url) || /video\/(\d+)/.exec(url) || [])[1];
-  if (!id) return [];
-  const html = await getText(`https://ok.ru/videoembed/${id}`, { Referer: "https://ok.ru/" });
-  const opt = /data-options="([^"]+)"/.exec(html);
-  if (!opt) return [];
-  const json = opt[1].replace(/&quot;/g, '"').replace(/&amp;/g, "&");
-  const meta = JSON.parse(JSON.parse(json).flashvars.metadata);
-  if (meta.hlsManifestUrl) return [{ url: meta.hlsManifestUrl, quality: "Auto", type: "hls" }];
-  return (meta.videos || []).map((v) => ({ url: v.url, quality: v.name, type: "mp4" }));
-}
-
-async function resolveRumble(url) {
-  const id = (/\/embed\/([^/?]+)/.exec(url) || [])[1];
-  if (!id) return [];
-  const j = await (await fetch(`https://rumble.com/embedJS/u3/?request=video&ver=2&v=${id}`, { headers: UA })).json();
-  const out = [];
-  if (j.ua && j.ua.hls && j.ua.hls.auto) out.push({ url: j.ua.hls.auto.url, quality: "Auto", type: "hls" });
+// Keep only Dailymotion / Rumble / Dood servers, ordered by ALLOWED priority.
+function filterServers(servers) {
+  const out = [], seen = {};
+  servers.forEach((s) => {
+    let idx = ALLOWED.findIndex((a) => a.label.test(s.label));
+    if (idx < 0) idx = ALLOWED.findIndex((a) => a.url.test(s.url));
+    if (idx < 0) return;
+    if (seen[s.url]) return;
+    seen[s.url] = 1;
+    out.push(Object.assign({ prio: idx, kind: ALLOWED[idx].key }, s));
+  });
+  out.sort((a, b) => a.prio - b.prio);
   return out;
 }
 
-async function resolve(server) {
+// ---------- quality handling ----------
+function qualityLabel(h) {
+  if (h >= 2000) return "2160p (4K)";
+  if (h >= 1400) return "1440p";
+  if (h >= 1000) return "1080p";
+  if (h >= 700) return "720p";
+  if (h >= 460) return "480p";
+  if (h >= 340) return "360p";
+  return h + "p";
+}
+
+function absUrl(base, rel) {
+  if (/^https?:/i.test(rel)) return rel;
+  if (rel[0] === "/") return base.replace(/^(https?:\/\/[^\/]+).*/, "$1") + rel;
+  return base.replace(/[^\/]*$/, "") + rel;
+}
+
+async function expandHls(masterUrl, hdrs) {
+  const out = [{ url: masterUrl, quality: "Auto", height: 0, master: true }];
+  try {
+    const txt = await getText(masterUrl, hdrs);
+    if (txt.indexOf("#EXTM3U") !== 0) DIAG.push("master?" + txt.length + ":" + txt.slice(0, 30).replace(/\s+/g, " "));
+    const lines = txt.split(/\r?\n/);
+    const byHeight = {};
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.indexOf("#EXT-X-STREAM-INF") !== 0) continue;
+      let next = "";
+      for (let k = i + 1; k < lines.length; k++) {
+        const t = lines[k].trim();
+        if (t && t[0] !== "#") { next = t; break; }
+      }
+      if (!next) continue;
+      const res = /RESOLUTION=(\d+)x(\d+)/.exec(line);
+      const nm = /NAME="?(\d{3,4})p?"?/.exec(line);
+      const hRaw = res ? parseInt(res[2], 10) : nm ? parseInt(nm[1], 10) : 0;
+      const wRaw = res ? parseInt(res[1], 10) : 0;
+      // scope/letterboxed video (e.g. 1280x544) is really the 720p tier
+      const h = Math.max(hRaw, Math.round((wRaw * 9) / 16));
+      if (!h) continue;
+      const bw = parseInt((/(?:^|[,:])BANDWIDTH=(\d+)/.exec(line) || [0, 0])[1], 10);
+      const avc = /avc1/i.test(line);
+      const cur = byHeight[h];
+      // one entry per quality; prefer H.264 (plays everywhere), then bitrate
+      if (!cur || (avc && !cur.avc) || (avc === cur.avc && bw > cur.bw)) {
+        byHeight[h] = { url: absUrl(masterUrl, next), height: h, bw: bw, avc: avc };
+      }
+    }
+    const hs = Object.keys(byHeight).map(Number).sort((x, y) => y - x);
+    if (hs.length) {
+      out[0].quality = "Auto (up to " + qualityLabel(hs[0]) + ")";
+      out[0].height = hs[0];
+      hs.forEach((h) => out.push({ url: byHeight[h].url, quality: qualityLabel(h), height: h }));
+    }
+  } catch (e) {}
+  return out;
+}
+
+const maxH = (links) => links.reduce((m, l) => Math.max(m, l.height || 0), 0);
+
+// ---------- Dailymotion ----------
+async function fetchJsonSafe(u, h) {
+  try {
+    const r = await fetch(u, { headers: h });
+    const t = await r.text();
+    const j = JSON.parse(t);
+    return j && j.qualities ? j : null;
+  } catch (e) { return null; }
+}
+
+async function linksFromMeta(j, H) {
+  const q = j.qualities, out = [], seenH = {};
+  try {
+    Object.keys(q).forEach((k) => {
+      if (!/^\d+$/.test(k)) return;
+      (q[k] || []).forEach((it) => {
+        if (!it || !it.url || it.type === "application/x-mpegURL") return;
+        const h = parseInt(k, 10);
+        if (seenH[h]) return;
+        seenH[h] = 1;
+        out.push({ url: it.url, quality: qualityLabel(h), height: h });
+      });
+    });
+  } catch (e) {}
+  const auto = q.auto && q.auto[0];
+  if (auto && auto.url) {
+    let hls = await expandHls(auto.url, UA_DM);
+    if (hls.length === 1) hls = await expandHls(auto.url, H);
+    hls.forEach((l) => { if (l.master || !seenH[l.height]) out.push(l); });
+  }
+  return out;
+}
+
+async function resolveDailymotion(url, pageUrl) {
+  const id = (/[?&]video=([^&]+)/.exec(url) || /\/video\/([^?_\/]+)/.exec(url) || [])[1];
+  if (!id) return [];
+  const playerId = (/\/player\/(\w+)\.html/.exec(url) || [])[1];
+  const ref = pageUrl || BASE + "/";
+  const v1 = randHex(32), ts = String(Math.floor(Math.random() * 90000) + 10000);
+  const H = Object.assign({}, UA_DM, { Referer: ref, Origin: BASE, Cookie: "v1st=" + v1 + "; ts=" + ts });
+  const plain = `https://www.dailymotion.com/player/metadata/video/${id}`;
+
+  const full = plain + "?" + [
+    "embedder=" + encodeURIComponent(ref),
+    "geo=1",
+    playerId ? "player-id=" + playerId : "",
+    "locale=en-US",
+    "dmV1st=" + v1,
+    "dmTs=" + ts,
+    "is_native_app=0",
+  ].filter(Boolean).join("&");
+
+  const attempts = [
+    { name: "full", url: full, h: H },
+    { name: "embedder", url: `${plain}?embedder=${encodeURIComponent(ref)}`, h: H },
+    { name: "plain", url: plain, h: UA_DM },
+  ];
+  let best = [], bestName = "";
+  for (const at of attempts) {
+    const j = await fetchJsonSafe(at.url, at.h);
+    if (!j) { DIAG.push("dm-" + at.name + ":fail"); continue; }
+    const links = await linksFromMeta(j, at.h);
+    const hs = links.map((l) => l.height).filter(Boolean).sort((x, y) => x - y);
+    DIAG.push("dm-" + at.name + ":" + (hs.join("/") || "auto"));
+    if (maxH(links) > maxH(best) || (!best.length && links.length)) { best = links; bestName = at.name; }
+    if (maxH(best) >= 2000) break;
+  }
+  // Some private embeds (video=k...) map to a public id (x...); ask for that too.
+  if (maxH(best) < 1000) {
+    try {
+      const j0 = await fetchJsonSafe(full, H);
+      const xid = j0 && (j0.id || j0.video_id);
+      if (xid && xid !== id) {
+        const j = await fetchJsonSafe(`https://www.dailymotion.com/player/metadata/video/${xid}?embedder=${encodeURIComponent(ref)}&dmV1st=${v1}&dmTs=${ts}`, H);
+        if (j) {
+          const links = await linksFromMeta(j, H);
+          DIAG.push("dm-xid:" + (links.map((l) => l.height).filter(Boolean).sort((x, y) => x - y).join("/") || "auto"));
+          if (maxH(links) > maxH(best)) { best = links; bestName = "xid"; }
+        }
+      }
+    } catch (e) {}
+  }
+  best.forEach((o) => { o.info = bestName; o.hdrs = UA; });
+  return best;
+}
+
+// ---------- Rumble ----------
+async function resolveRumble(url, pageUrl) {
+  const id = (/\/embed\/([^/?]+)/.exec(url) || [])[1];
+  if (!id) return [];
+  const H = Object.assign({}, UA, { Referer: pageUrl || BASE + "/" });
+  const txt = await getText(`https://rumble.com/embedJS/u3/?request=video&ver=2&v=${id}`, H);
+  let j;
+  try { j = JSON.parse(txt); } catch (e) { DIAG.push("rumble:badjson"); return []; }
+  const PH = Object.assign({}, UA, { Referer: "https://rumble.com/" });
+  const out = [], seen = {};
+  const add = (u, h) => {
+    if (!u || seen[u]) return;
+    seen[u] = 1;
+    out.push({ url: u, quality: qualityLabel(h), height: h, hdrs: PH });
+  };
+  // direct files per quality (mp4 / webm)
+  [j.ua, j.u].forEach((root) => {
+    if (!root) return;
+    ["mp4", "webm"].forEach((fmt) => {
+      const grp = root[fmt];
+      if (!grp) return;
+      Object.keys(grp).forEach((k) => {
+        const it = grp[k];
+        const h = (it && it.meta && it.meta.h) || parseInt(k, 10);
+        if (h && it && it.url) add(it.url, h);
+      });
+    });
+  });
+  // HLS (both possible locations)
+  const hlsUrl =
+    (j.ua && j.ua.hls && j.ua.hls.auto && j.ua.hls.auto.url) ||
+    (j.u && j.u.hls && j.u.hls.auto && j.u.hls.auto.url);
+  if (hlsUrl) {
+    const list = await expandHls(hlsUrl, PH);
+    list.forEach((l) => { if (!seen[l.url]) { seen[l.url] = 1; l.hdrs = PH; out.push(l); } });
+  }
+  DIAG.push("rumble:" + (out.map((l) => l.height).filter(Boolean).sort((x, y) => x - y).join("/") || "none"));
+  return out;
+}
+
+// ---------- Dood ----------
+async function resolveDood(url, pageUrl) {
+  // normalise /d/ID to /e/ID (embed page)
+  let embed = url.replace(/\/d\//, "/e/");
+  const r = await fetch(embed, { headers: Object.assign({}, UA, { Referer: pageUrl || BASE + "/" }) });
+  const html = await r.text();
+  const finalUrl = (r && r.url) || embed;
+  const origin = "https://" + hostOf(finalUrl);
+  const pm = /\/pass_md5\/([^'"\s]+)/.exec(html);
+  if (!pm) { DIAG.push("dood:nopass len=" + html.length); return []; }
+  const token = pm[1].split("/").pop();
+  const PH = Object.assign({}, UA, { Referer: origin + "/" });
+  const base = (await getText(origin + "/pass_md5/" + pm[1], Object.assign({}, UA, { Referer: finalUrl }))).trim();
+  if (!/^https?:/i.test(base)) { DIAG.push("dood:badbase " + base.slice(0, 40)); return []; }
+  const link = base + randAlnum(10) + "?token=" + token + "&expiry=" + Date.now();
+  DIAG.push("dood:ok");
+  // Dood does not expose the resolution in the page; label as Direct
+  return [{ url: link, quality: "Direct", height: 0, hdrs: PH }];
+}
+
+async function resolve(server, pageUrl) {
   const u = server.url;
   try {
-    if (/dailymotion\.com/.test(u)) return await resolveDailymotion(u);
-    if (/ok\.ru/.test(u)) return await resolveOkru(u);
-    if (/rumble\.com/.test(u)) return await resolveRumble(u);
-  } catch (e) {}
-  return []; // Odysee / Mega / Dood: not supported yet
+    if (server.kind === "Dailymotion") return await resolveDailymotion(u, pageUrl);
+    if (server.kind === "Rumble") return await resolveRumble(u, pageUrl);
+    if (server.kind === "Dood") return await resolveDood(u, pageUrl);
+  } catch (e) { DIAG.push(server.kind + " err " + (e && e.message)); }
+  return [];
 }
 
 // ---------- entry point ----------
 async function getStreams(tmdbId, mediaType, season, episode) {
   const dbg = [];
-  const fail = (m) => [{ name: "Animexin DEBUG", title: dbg.concat(m).join(" > "), url: "https://debug.invalid/", quality: "debug" }];
+  DIAG.length = 0;
+  const fail = (m) => [{ name: "Animexin DEBUG", title: dbg.concat(m, DIAG).join(" > ").slice(0, 1200), url: "https://debug.invalid/", quality: "debug" }];
   try {
     const titles = await getTitles(tmdbId, mediaType);
     dbg.push("titles=" + titles.join("|"));
@@ -173,17 +398,27 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       if (!pageUrl) return fail("episode not found");
     }
 
-    const servers = extractServers(await getText(pageUrl));
-    dbg.push("servers=" + servers.length);
-    const streams = [];
-    await Promise.all(
-      servers.map(async (s) => {
-        const links = await resolve(s);
-        links.forEach((l) =>
-          streams.push({ name: "Animexin", title: s.label, url: l.url, quality: l.quality, headers: UA, provider: "animexin" })
-        );
-      })
+    const all = extractServers(await getText(pageUrl));
+    const servers = filterServers(all);
+    dbg.push("servers=" + all.length + " kept=" + servers.length + "[" + servers.map((s) => s.label).join(",") + "]");
+
+    const results = await Promise.all(
+      servers.map(async (s) => ({ s, links: await resolve(s, pageUrl) }))
     );
+    const streams = [];
+    results.forEach(({ s, links }) => {
+      links.sort((a, b) => b.height - a.height);
+      links.forEach((l) =>
+        streams.push({
+          name: "Animexin",
+          title: s.kind + (s.label ? " - " + s.label : "") + (l.info ? " (" + l.info + ")" : ""),
+          url: l.url,
+          quality: l.quality,
+          headers: l.hdrs || UA,
+          provider: "animexin",
+        })
+      );
+    });
     return streams.length ? streams : fail("no playable streams");
   } catch (e) {
     return fail("ERROR " + (e && e.message));
