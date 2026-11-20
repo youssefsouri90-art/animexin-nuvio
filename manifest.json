@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
-  "version": "1.0.0",
-  "description": "Donghua & anime streams from animexin.dev",
+  "version": "1.1.0",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com)",
   "scrapers": [
     {
       "id": "animexin",
@@ -13,6 +13,17 @@
       "filename": "providers/animexin.js",
       "enabled": true,
       "formats": ["hls", "mp4"]
+    },
+    {
+      "id": "donghuaworld",
+      "name": "DonghuaWorld",
+      "description": "Donghua with quality options up to 4K from donghuaworld.com",
+      "version": "1.0.0",
+      "author": "you",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/donghuaworld.js",
+      "enabled": true,
+      "formats": ["hls"]
     }
   ]
 }
