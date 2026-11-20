@@ -329,15 +329,23 @@ async function search(query) {
     return [];
   }
   const results = [], seen = {};
-  const re = /<a[^>]+href="((?:https?:\/\/[^"\/]+)?\/(?:watch|anime)\/([^"\/#?]+)[^"#?]*)"[^>]*>/gi;
+  // Keep the resource kind so movie search results cannot be used for series.
+  const re = /<a[^>]+href="((?:https?:\/\/[^"\/]+)?\/(watch|anime|movie)\/([^"\/#?]+)(?:\/([^"#?]*))?[^\"]*)"[^>]*>/gi;
   let m;
   while ((m = re.exec(html))) {
-    const slug = m[2];
-    if (slug === "movie" || seen[slug]) continue;
-    seen[slug] = 1;
+    let kind = String(m[2] || "").toLowerCase();
+    let slug = m[3] || "";
+    if (kind === "watch" && slug === "movie") {
+      kind = "movie";
+      slug = String(m[4] || "").split("/")[0];
+    }
+    if (!slug) continue;
+    const key = kind + ":" + slug;
+    if (seen[key]) continue;
+    seen[key] = 1;
     const t = /title="([^"]+)"/i.exec(m[0]);
     const slugTitle = safeDecode(slug).replace(/-/g, " ");
-    results.push({ slug, title: t ? t[1] : slugTitle, slugTitle });
+    results.push({ slug, kind, title: t ? t[1] : slugTitle, slugTitle });
   }
   DIAG.push("search " + results.length);
   return results;
@@ -352,6 +360,7 @@ async function findBySearch(titles, season, episode, isMovie) {
   let best = null;
   for (const q of queries.slice(0, 5)) {
     for (const r of await search(q)) {
+      if (isMovie ? r.kind !== "movie" : r.kind === "movie") continue;
       let score = Math.max(similarity(q, r.title), similarity(q, r.slugTitle));
       if (season > 1 && seasonRe(season).test(r.title + " " + r.slugTitle)) score += 0.3;
       if (!best || score > best.score) best = Object.assign({ score }, r);
