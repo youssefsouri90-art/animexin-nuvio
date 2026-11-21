@@ -1,6 +1,6 @@
 {
   "name": "Animexin Nuvio",
-  "version": "1.5.0",
+  "version": "1.6.1",
   "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, witanime.site, anichi.cz, hydrahd.gd)",
   "scrapers": [
     {
