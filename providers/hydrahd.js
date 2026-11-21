@@ -78,17 +78,31 @@ async function decryptUrls(encB64, wasmUrl, referer) {
   DIAG.push("wasm-http" + res.status);
   const bytes = await getBytes(res);
   DIAG.push("bytes" + bytes.length);
-  let inst;
-  if (typeof WebAssembly.compile === "function") {
-    const mod = await WebAssembly.compile(bytes);
-    DIAG.push("compiled");
-    inst = await WebAssembly.instantiate(mod, {});
-  } else {
-    inst = (await WebAssembly.instantiate(bytes, {})).instance;
+  DIAG.push("WA{" + ["compile","instantiate","Module","Instance","Memory"].map((k) => k + ":" + typeof WebAssembly[k]).join(",") + "}");
+  let ex = null;
+  const tries = [];
+  if (typeof WebAssembly.Module === "function" && typeof WebAssembly.Instance === "function") {
+    tries.push(async () => new WebAssembly.Instance(new WebAssembly.Module(bytes), {}));
   }
-  DIAG.push("inst");
-  const ex = inst.exports;
-  DIAG.push("exports:" + Object.keys(ex).join(","));
+  if (typeof WebAssembly.compile === "function") {
+    tries.push(async () => WebAssembly.instantiate(await WebAssembly.compile(bytes), {}));
+  }
+  tries.push(async () => {
+    const r = await WebAssembly.instantiate(bytes, {});
+    return r && r.instance ? r.instance : r;
+  });
+  for (let i = 0; i < tries.length; i++) {
+    try {
+      const inst = await tries[i]();
+      const e = inst && inst.exports;
+      const names = e ? Object.getOwnPropertyNames(e) : [];
+      DIAG.push("try" + i + ":names=" + names.join("|") + ",alloc=" + typeof (e && e.alloc) + ",dec=" + typeof (e && e.decrypt) + ",mem=" + typeof (e && e.memory));
+      if (e && typeof e.alloc === "function" && typeof e.decrypt === "function") { ex = e; break; }
+    } catch (err) {
+      DIAG.push("try" + i + ":err=" + String((err && err.message) || err).slice(0, 40));
+    }
+  }
+  if (!ex) throw new Error("no usable exports");
   const enc = b64(encB64);
   const ptr = ex.alloc(enc.length);
   new Uint8Array(ex.memory.buffer, ptr, enc.length).set(enc);
