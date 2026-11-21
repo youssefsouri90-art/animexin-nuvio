@@ -3,6 +3,7 @@
 // X-Stream-Token header (HMAC-SHA256 of "<tmdb>:<minute>"), response url is
 // either plain or base64+XOR. Pure JS (no crypto.subtle / TextEncoder needed).
 // v2: detects real qualities from the HLS master playlist so Nuvio shows them.
+// v3: adds Arabic subtitles (from the API response, the HLS master, or Wyzie as fallback).
 
 const API = "https://cinema.army/api";
 const SITE = "https://cinema.army/";
@@ -160,7 +161,16 @@ async function parseMaster(url, headers) {
     if (text.indexOf("#EXT-X-STREAM-INF") === -1) return [];
     const lines = text.split(/\r?\n/);
     const out = [];
+    out.subs = [];
     for (let i = 0; i < lines.length; i++) {
+      if (lines[i].indexOf("#EXT-X-MEDIA") === 0 && /TYPE=SUBTITLES/i.test(lines[i])) {
+        const um = lines[i].match(/URI="([^"]+)"/i);
+        const lm = lines[i].match(/LANGUAGE="([^"]*)"/i);
+        const nm = lines[i].match(/NAME="([^"]*)"/i);
+        const sub = makeSub(um && resolveUrl(url, um[1]), (lm && lm[1]) || "", (nm && nm[1]) || "");
+        if (sub && isArabic(sub.lang + " " + sub.label)) out.subs.push(sub);
+        continue;
+      }
       if (lines[i].indexOf("#EXT-X-STREAM-INF") !== 0) continue;
       const rm = lines[i].match(/RESOLUTION=(\d+)x(\d+)/i);
       const bm = lines[i].match(/BANDWIDTH=(\d+)/i);
@@ -179,6 +189,62 @@ async function parseMaster(url, headers) {
       });
     }
     out.sort((a, b) => b.height - a.height || b.bandwidth - a.bandwidth);
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
+// ---------- Arabic subtitles ----------
+function isArabic(s) {
+  return /(^|[^a-z])(ar|ara|arb)([^a-z]|$)|arabic|عرب/i.test(String(s || ""));
+}
+
+function makeSub(url, lang, label) {
+  if (!url || !/^https?:\/\//i.test(url)) return null;
+  return {
+    url: url,
+    lang: "ar",
+    language: "ar",
+    label: label || "العربية",
+    name: label || "العربية",
+  };
+}
+
+// Looks for subtitle tracks in the API JSON (field names vary, so check the common ones).
+function extractSubs(j) {
+  const found = [];
+  const st = (j && j.stream) || {};
+  const lists = [st.subtitles, st.captions, st.tracks, j && j.subtitles, j && j.captions, j && j.tracks];
+  lists.forEach((list) => {
+    if (!list || !list.length) return;
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i] || {};
+      const raw = t.url || t.file || t.src || t.link || "";
+      const lang = t.lang || t.language || t.srclang || t.code || "";
+      const label = t.label || t.name || t.title || t.display || "";
+      if (!isArabic(lang + " " + label)) continue;
+      const sub = makeSub(decodeUrl(raw), lang, label);
+      if (sub) found.push(sub);
+    }
+  });
+  return found;
+}
+
+// Fallback: Wyzie Subs (aggregates OpenSubtitles etc.), searched by TMDB id.
+async function fetchExternalArabicSubs(id, isTv, season, episode) {
+  try {
+    let u = "https://sub.wyzie.ru/search?id=" + encodeURIComponent(id) + "&language=ar&format=srt";
+    if (isTv) u += "&season=" + (Number(season) || 1) + "&episode=" + (Number(episode) || 1);
+    const res = await fetch(u, { headers: { "User-Agent": UA, Accept: "application/json" } });
+    if (!res.ok) return [];
+    const arr = JSON.parse(await res.text());
+    if (!arr || !arr.length) return [];
+    const out = [];
+    for (let i = 0; i < arr.length && out.length < 3; i++) {
+      const sub = makeSub(arr[i].url, "ar", "العربية " + (out.length + 1));
+      if (sub) out.push(sub);
+    }
     return out;
   } catch (e) {
     return [];
@@ -208,7 +274,7 @@ async function fetchServer(srv, path, token) {
   if (!raw) return { srv, err: "nourl" };
   const url = decodeUrl(raw);
   if (!/^https?:\/\//i.test(url)) return { srv, err: "baddecode" };
-  return { srv, url };
+  return { srv, url, subs: extractSubs(j) };
 }
 
 function fail(results) {
@@ -253,6 +319,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     good.map(async (r) => {
       const list = [];
       const variants = await parseMaster(r.url, hdrs);
+      const subs = (r.subs || []).concat((variants && variants.subs) || []);
       if (variants.length) {
         const seen = {};
         variants.forEach((v) => {
@@ -265,6 +332,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
             url: v.url,
             quality: q,
             headers: hdrs,
+            subtitles: subs,
             provider: "cinemaarmy",
           });
         });
@@ -276,6 +344,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
           url: r.url,
           quality: FALLBACK_QUALITY,
           headers: hdrs,
+          subtitles: subs,
           provider: "cinemaarmy",
         });
       }
@@ -285,6 +354,13 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
   const streams = [];
   perServer.forEach((list) => list.forEach((s) => streams.push(s)));
+
+  // No Arabic track from the site itself: try the external fallback once and share it.
+  const hasAr = streams.some((s) => s.subtitles && s.subtitles.length);
+  if (!hasAr) {
+    const ext = await fetchExternalArabicSubs(id, isTv, season, episode);
+    if (ext.length) streams.forEach((s) => (s.subtitles = ext));
+  }
   return streams;
 }
 
