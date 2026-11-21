@@ -33,23 +33,67 @@ function utf8(bytes) {
   return s; // URLs are plain ASCII
 }
 
+async function getBytes(res) {
+  const has = [];
+  ["arrayBuffer", "bytes", "blob"].forEach((k) => {
+    has.push(k + ":" + typeof res[k]);
+  });
+  has.push("body:" + typeof res.body);
+  DIAG.push("resp{" + has.join(",") + "}");
+  if (typeof res.arrayBuffer === "function") {
+    return new Uint8Array(await res.arrayBuffer());
+  }
+  if (typeof res.bytes === "function") {
+    return new Uint8Array(await res.bytes());
+  }
+  if (typeof res.blob === "function") {
+    const b = await res.blob();
+    if (b && typeof b.arrayBuffer === "function") {
+      return new Uint8Array(await b.arrayBuffer());
+    }
+  }
+  if (res.body && typeof res.body.getReader === "function") {
+    const rd = res.body.getReader();
+    const parts = [];
+    let total = 0;
+    for (;;) {
+      const x = await rd.read();
+      if (x.done) break;
+      parts.push(x.value);
+      total += x.value.length;
+    }
+    const out = new Uint8Array(total);
+    let o = 0;
+    parts.forEach((c) => { out.set(c, o); o += c.length; });
+    return out;
+  }
+  throw new Error("no binary read");
+}
+
 async function decryptUrls(encB64, wasmUrl, referer) {
   if (typeof WebAssembly === "undefined") throw new Error("no WebAssembly");
   const res = await fetch(wasmUrl, {
     headers: { "User-Agent": UA, Referer: referer },
   });
-  const bytes = await res.arrayBuffer();
+  DIAG.push("wasm-http" + res.status);
+  const bytes = await getBytes(res);
+  DIAG.push("bytes" + bytes.length);
   let inst;
-  if (WebAssembly.compile) {
-    inst = await WebAssembly.instantiate(await WebAssembly.compile(bytes), {});
+  if (typeof WebAssembly.compile === "function") {
+    const mod = await WebAssembly.compile(bytes);
+    DIAG.push("compiled");
+    inst = await WebAssembly.instantiate(mod, {});
   } else {
     inst = (await WebAssembly.instantiate(bytes, {})).instance;
   }
+  DIAG.push("inst");
   const ex = inst.exports;
+  DIAG.push("exports:" + Object.keys(ex).join(","));
   const enc = b64(encB64);
   const ptr = ex.alloc(enc.length);
   new Uint8Array(ex.memory.buffer, ptr, enc.length).set(enc);
   const n = ex.decrypt(ptr, enc.length);
+  DIAG.push("dec" + n);
   return utf8(new Uint8Array(ex.memory.buffer, ptr + 12, n))
     .split("\n")
     .filter(Boolean);
