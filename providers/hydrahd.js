@@ -186,6 +186,106 @@ async function getEpisodeServers(pageUrl, season, episode) {
   return servers;
 }
 
+// Resolve VixSrc's short-lived embed page to its real HLS master playlist.
+// The playlist includes audio and subtitle renditions, including Arabic when
+// available. The token is intentionally fetched on every request because it
+// expires.
+async function resolveVixSrc(tmdbId, mediaType, season, episode) {
+  try {
+    const id = encodeURIComponent(String(tmdbId));
+    const s = Number(season) || 1;
+    const e = Number(episode) || 1;
+    const api = mediaType === "movie"
+      ? `https://vixsrc.to/api/movie/${id}`
+      : `https://vixsrc.to/api/tv/${id}/${s}/${e}`;
+
+    const apiRes = await fetch(api, {
+      headers: Object.assign({}, UA, { Referer: "https://vixsrc.to/" }),
+    });
+    if (!apiRes.ok) {
+      DIAG.push("vix-api=" + apiRes.status);
+      return null;
+    }
+    const apiJson = await apiRes.json();
+    if (!apiJson || typeof apiJson.src !== "string") {
+      DIAG.push("vix-no-src");
+      return null;
+    }
+
+    const embedUrl = new URL(apiJson.src, "https://vixsrc.to/").toString();
+    const embedRes = await fetch(embedUrl, {
+      headers: Object.assign({}, UA, { Referer: "https://vixsrc.to/" }),
+    });
+    if (!embedRes.ok) {
+      DIAG.push("vix-embed=" + embedRes.status);
+      return null;
+    }
+    const html = await embedRes.text();
+    const videoId = ( /window\.video\s*=\s*\{\s*id:\s*['"]([^'"]+)['"]/i.exec(html) || [] )[1];
+    const block = ( /window\.masterPlaylist\s*=\s*\{([\s\S]*?)\n\s*\}/i.exec(html) || [] )[1];
+    if (!videoId || !block) {
+      DIAG.push("vix-no-playlist");
+      return null;
+    }
+
+    const params = {};
+    const re = /['"]([^'"]+)['"]\s*:\s*['"]([^'"]*)['"]/g;
+    let m;
+    while ((m = re.exec(block))) params[m[1]] = m[2];
+    params.h = "1";
+    params.lang = "en";
+
+    const playlist = new URL(`https://vixsrc.to/playlist/${encodeURIComponent(videoId)}`);
+    Object.keys(params).forEach((key) => {
+      if (params[key] !== "") playlist.searchParams.set(key, params[key]);
+    });
+    DIAG.push("vix-hls");
+    return {
+      name: "VixSrc",
+      quality: "Auto (HLS)",
+      url: playlist.toString(),
+      headers: Object.assign({}, UA, {
+        Referer: embedUrl,
+        Origin: "https://vixsrc.to",
+      }),
+    };
+  } catch (e) {
+    DIAG.push("vix-error=" + String(e && e.message || e).slice(0, 80));
+    return null;
+  }
+}
+
+// HydraHD's tv AJAX endpoint can return Cloudflare 403 outside a browser.
+// These providers expose the same episode using the TMDB id, so use them as
+// a fallback when HydraHD does not expose its server buttons.
+function fallbackTvServers(tmdbId, season, episode) {
+  const s = Number(season) || 1;
+  const e = Number(episode) || 1;
+  const id = encodeURIComponent(String(tmdbId));
+  return [
+    {
+      url: `https://vixsrc.to/tv/${id}/${s}/${e}?autoplay=true`,
+      name: "VixSrc",
+      quality: "HD",
+    },
+    {
+      url: `https://vidfast.vc/tv/${id}/${s}/${e}?autoPlay=true&theme=e50914`,
+      name: "VidFast",
+      quality: "HD",
+    },
+    {
+      url: `https://www.1src.org/embed/tv/${id}/${s}/${e}?autoplay=1`,
+      name: "1Src",
+      quality: "HD",
+    },
+    {
+      url: `https://primesrc.me/embed/tv?tmdb=${id}&season=${s}&episode=${e}`,
+      name: "PrimeSrc",
+      quality: "HD",
+    },
+  ];
+}
+
 function fail(msg, dbg) {
   const all = (dbg || []).concat(msg, DIAG).join(" > ");
   return [{
@@ -204,6 +304,18 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     if (!info.title) return fail("no title", dbg);
     dbg.push("title=" + info.title + (info.year ? " year=" + info.year : ""));
 
+    const direct = await resolveVixSrc(tmdbId, mediaType, season, episode);
+    if (direct) {
+      return [{
+        name: "HydraHD",
+        title: direct.name,
+        url: direct.url,
+        quality: direct.quality,
+        headers: direct.headers,
+        provider: "hydrahd",
+      }];
+    }
+
     const results = await searchHydra(info.title, mediaType, info.year);
     if (!results.length) return fail("not found", dbg);
 
@@ -219,6 +331,11 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         servers = await getEpisodeServers(url, season, episode);
       }
       if (servers.length) { selected = candidate; break; }
+    }
+    if (!servers.length && mediaType !== "movie") {
+      servers = fallbackTvServers(tmdbId, season, episode);
+      selected = { url: BASE + "/" };
+      DIAG.push("tv-fallback=" + servers.length);
     }
     dbg.push("page=" + (selected ? selected.url : "none"));
     dbg.push("servers=" + servers.length);
