@@ -56,13 +56,15 @@ async function decryptUrls(encB64, wasmUrl, referer) {
 }
 
 function fail(msg) {
+  const env =
+    "WA:" + typeof WebAssembly +
+    " atob:" + typeof atob +
+    " TD:" + typeof TextDecoder +
+    " U8:" + typeof Uint8Array;
   return [
-    {
-      name: "YTHD debug",
-      title: [msg].concat(DIAG).join(" > "),
-      url: "https://debug.invalid/ythd",
-      quality: "debug",
-    },
+    { name: "YTHD: " + msg, title: msg, url: "https://debug.invalid/ythd/1", quality: "debug" },
+    { name: "YTHD steps: " + (DIAG.join(">") || "none"), title: "steps", url: "https://debug.invalid/ythd/2", quality: "debug" },
+    { name: "YTHD env: " + env, title: "env", url: "https://debug.invalid/ythd/3", quality: "debug" },
   ];
 }
 
@@ -77,6 +79,7 @@ async function getStreams(tmdbId, mediaType) {
     let inner;
     try { inner = JSON.parse(a.t).src; } catch (e) { return fail("no inner src"); }
     if (!inner) return fail("no inner src");
+    DIAG.push("inner");
 
     const ip = await get(inner, { Referer: wrap });
     const pm = /"playerUrl":"([^"]+)"/.exec(ip.t);
@@ -89,6 +92,7 @@ async function getStreams(tmdbId, mediaType) {
     const tm = /"apiToken"\s*:\s*"([^"]+)"/.exec(pp.t);
     const am = /"api"\s*:\s*"([^"]+)"/.exec(pp.t);
     if (!tm || !am) return fail("no api/token");
+    DIAG.push("player");
     const origin = player.replace(/^(https?:\/\/[^\/]+).*$/, "$1");
 
     const api = unesc(am[1]) + "&api_token=" + encodeURIComponent(tm[1]);
@@ -96,12 +100,14 @@ async function getStreams(tmdbId, mediaType) {
     let j;
     try { j = JSON.parse(jr.t); } catch (e) { return fail("api not json"); }
     if (!j || !j.data) return fail("api no data");
+    DIAG.push("api");
 
     let urls = j.data.stream_urls;
     if (typeof urls === "string") {
       if (!j.vs || !j.vs.wasm_url) return fail("no wasm_url");
       urls = await decryptUrls(urls, j.vs.wasm_url, player);
     }
+    DIAG.push("decrypt");
     if (!urls || !urls.length) return fail("no urls");
 
     const file = String(j.data.file_name || "");
