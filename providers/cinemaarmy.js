@@ -2,6 +2,7 @@
 // Mirrors the site's own front-end flow (public JS): per-server API call with an
 // X-Stream-Token header (HMAC-SHA256 of "<tmdb>:<minute>"), response url is
 // either plain or base64+XOR. Pure JS (no crypto.subtle / TextEncoder needed).
+// v2: detects real qualities from the HLS master playlist so Nuvio shows them.
 
 const API = "https://cinema.army/api";
 const SITE = "https://cinema.army/";
@@ -25,6 +26,9 @@ const TV_SERVERS = [
   { key: "ipcloud", name: "Server 3", method: "GET" },
   { key: "dcloud", name: "Server 4", method: "GET" },
 ];
+
+// Quality label used when the real quality can't be detected.
+const FALLBACK_QUALITY = "1080p";
 
 // ---------- SHA-256 / HMAC (pure JS) ----------
 const K = [
@@ -126,6 +130,61 @@ function decodeUrl(e) {
   }
 }
 
+// ---------- HLS quality detection ----------
+function heightToQuality(h) {
+  if (h >= 2160) return "4K";
+  if (h >= 1440) return "1440p";
+  if (h >= 1080) return "1080p";
+  if (h >= 720) return "720p";
+  if (h >= 480) return "480p";
+  return "360p";
+}
+
+function resolveUrl(base, ref) {
+  if (/^https?:\/\//i.test(ref)) return ref;
+  const m = base.match(/^(https?:\/\/[^\/]+)(\/[^?#]*)?/i);
+  if (!m) return ref;
+  const origin = m[1];
+  if (ref.charAt(0) === "/") return origin + ref;
+  const path = m[2] || "/";
+  return origin + path.slice(0, path.lastIndexOf("/") + 1) + ref;
+}
+
+// Returns [{ url, height, bandwidth }] sorted best-first,
+// or [] if the url is not a master playlist or the fetch fails.
+async function parseMaster(url, headers) {
+  try {
+    const res = await fetch(url, { headers });
+    if (!res.ok) return [];
+    const text = await res.text();
+    if (text.indexOf("#EXT-X-STREAM-INF") === -1) return [];
+    const lines = text.split(/\r?\n/);
+    const out = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].indexOf("#EXT-X-STREAM-INF") !== 0) continue;
+      const rm = lines[i].match(/RESOLUTION=(\d+)x(\d+)/i);
+      const bm = lines[i].match(/BANDWIDTH=(\d+)/i);
+      let next = "";
+      for (let j = i + 1; j < lines.length; j++) {
+        if (lines[j] && lines[j].charAt(0) !== "#") {
+          next = lines[j].trim();
+          break;
+        }
+      }
+      if (!next) continue;
+      out.push({
+        url: resolveUrl(url, next),
+        height: rm ? parseInt(rm[2], 10) : 0,
+        bandwidth: bm ? parseInt(bm[1], 10) : 0,
+      });
+    }
+    out.sort((a, b) => b.height - a.height || b.bandwidth - a.bandwidth);
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
 // ---------- provider ----------
 async function fetchServer(srv, path, token) {
   const res = await fetch(API + "/" + srv.key + path, {
@@ -157,7 +216,7 @@ function fail(results) {
     .map((r) => r.srv.key + ":" + (r.err || (r.url ? "ok" : "?")))
     .join(" ");
   return [
-    { name: "CinemaArmy v1: " + sum, title: "debug", url: "https://debug.invalid/ca", quality: "debug" },
+    { name: "CinemaArmy v2: " + sum, title: "debug", url: "https://debug.invalid/ca", quality: "debug" },
   ];
 }
 
@@ -186,15 +245,47 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
   const good = results.filter((r) => r.url);
   if (!good.length) return fail(results);
-  return good.map((r) => ({
-    name: "CinemaArmy",
-    title: r.srv.name,
-    url: r.url,
-    quality: "Auto (HLS)",
-    headers: { "User-Agent": UA, Referer: SITE, Origin: "https://cinema.army" },
-    provider: "cinemaarmy",
-  }));
+
+  const hdrs = { "User-Agent": UA, Referer: SITE, Origin: "https://cinema.army" };
+
+  // One entry per server, each resolved to its real qualities (kept in server order).
+  const perServer = await Promise.all(
+    good.map(async (r) => {
+      const list = [];
+      const variants = await parseMaster(r.url, hdrs);
+      if (variants.length) {
+        const seen = {};
+        variants.forEach((v) => {
+          const q = v.height ? heightToQuality(v.height) : FALLBACK_QUALITY;
+          if (seen[q]) return; // keep the highest-bandwidth variant per quality
+          seen[q] = true;
+          list.push({
+            name: "CinemaArmy " + q,
+            title: r.srv.name + " - " + q,
+            url: v.url,
+            quality: q,
+            headers: hdrs,
+            provider: "cinemaarmy",
+          });
+        });
+      } else {
+        // Couldn't read a master playlist: return the raw link with a valid quality label.
+        list.push({
+          name: "CinemaArmy " + FALLBACK_QUALITY,
+          title: r.srv.name,
+          url: r.url,
+          quality: FALLBACK_QUALITY,
+          headers: hdrs,
+          provider: "cinemaarmy",
+        });
+      }
+      return list;
+    })
+  );
+
+  const streams = [];
+  perServer.forEach((list) => list.forEach((s) => streams.push(s)));
+  return streams;
 }
 
-module.exports = { getStreams, hmacSha256Hex, sha256, decodeUrl };
-
+module.exports = { getStreams, hmacSha256Hex, sha256, decodeUrl, parseMaster, heightToQuality };
