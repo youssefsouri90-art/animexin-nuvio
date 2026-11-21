@@ -331,8 +331,7 @@ async function trySlugCandidates(slugs, episode, isMovie) {
 }
 
 // ---------- site ----------
-async function tryWatch(slug, episode, isMovie) {
-  const url = isMovie ? `${BASE}/watch/movie/${slug}` : `${BASE}/watch/${slug}/${episode}`;
+async function fetchWatchPage(url, slug) {
   try {
     const r = await fx(url, { headers: pageHeaders(BASE + "/") }, 1, 10000);
     const html = await r.text();
@@ -341,6 +340,36 @@ async function tryWatch(slug, episode, isMovie) {
     return bad ? null : { url, html, slug };
   } catch (e) {
     DIAG.push("try " + slug + ":err");
+    return null;
+  }
+}
+
+async function tryWatch(slug, episode, isMovie) {
+  const url = isMovie ? `${BASE}/watch/movie/${slug}` : `${BASE}/watch/${slug}/${episode}`;
+  return fetchWatchPage(url, slug);
+}
+
+const normDigits = (s) => String(s || "").replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x660));
+
+// The real episode links live on /anime/<slug>; the watch slug there can differ from the anime slug.
+async function watchFromAnimePage(animeSlug, episode) {
+  try {
+    const r = await fx(`${BASE}/anime/${animeSlug}`, { headers: pageHeaders(BASE + "/") }, 1, 10000);
+    if (r.status >= 400) { DIAG.push("anime " + animeSlug + ":" + r.status); return null; }
+    let html = await r.text();
+    const at = html.indexOf("data-episode-list");
+    if (at >= 0) html = html.slice(at);
+    const re = /href="((?:https?:\/\/[^"\/]+)?\/watch\/(?!movie\/)([^"\/#?]+)\/([^"\/#?]+)[^"]*)"/gi;
+    let m, hit = null;
+    while ((m = re.exec(html))) {
+      const n = parseFloat(normDigits(safeDecode(m[3])));
+      if (n === episode) { hit = m; break; }
+    }
+    DIAG.push("anime " + animeSlug + ":" + (hit ? "ep" + episode + "=" + hit[2] : "no ep" + episode));
+    if (!hit) return null;
+    return fetchWatchPage(absUrl(BASE + "/", hit[1].replace(/&amp;/g, "&")), hit[2]);
+  } catch (e) {
+    DIAG.push("anime " + animeSlug + ":err");
     return null;
   }
 }
@@ -398,20 +427,34 @@ async function findBySearch(titles, season, episode, isMovie) {
     if (best && best.score >= 0.8) break;
   }
   if (!best || best.score < 0.5) return null;
-  DIAG.push("search-best " + best.slug);
-  return await tryWatch(best.slug, episode, isMovie);
+  DIAG.push("search-best " + best.kind + ":" + best.slug);
+  if (!isMovie && best.kind === "anime") {
+    const viaAnime = await watchFromAnimePage(best.slug, episode);
+    if (viaAnime) return viaAnime;
+  }
+  return (await tryWatch(best.slug, episode, isMovie)) || (!isMovie ? await watchFromAnimePage(best.slug, episode) : null);
 }
 
 // ---------- sources + gates ----------
 function csrfOf(html) {
-  const m = /name="csrf-token"\s+content="([^"]+)"/i.exec(html);
+  const m =
+    /<meta[^>]+name=["']csrf-token["'][^>]*content=["']([^"']+)["']/i.exec(html) ||
+    /<meta[^>]+content=["']([^"']+)["'][^>]*name=["']csrf-token["']/i.exec(html);
   return m ? m[1] : "";
 }
 
 function sourcesUrlOf(page) {
-  const m = /sourcesUrl\s*:\s*['"]([^'"]+)['"]/.exec(page.html);
+  // Current pages keep the config as JSON in data-watch-config.
+  let m = /data-watch-config\s*=\s*(["'])([\s\S]*?)\1/i.exec(page.html);
+  if (m) {
+    try {
+      const cfg = JSON.parse(m[2].replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&amp;/g, "&"));
+      if (cfg && cfg.sourcesUrl) return absUrl(BASE + "/", String(cfg.sourcesUrl).replace(/\\\//g, "/"));
+    } catch (e) {}
+  }
+  m = /sourcesUrl\s*:\s*['"]([^'"]+)['"]/.exec(page.html);
   if (m) return absUrl(BASE + "/", m[1].replace(/\\\//g, "/"));
-  return page.url + "/sources";
+  return page.url.replace(/\/+$/, "") + "/sources";
 }
 
 function xhrHeaders(page, csrf) {
@@ -431,10 +474,93 @@ function xhrHeaders(page, csrf) {
   );
 }
 
+// ---------- server ordering (ported from the original CloudStream plugin) ----------
+function hostFamily(name) {
+  const n = String(name || "").toLowerCase().trim();
+  if (n.indexOf("videas") >= 0 || n === "svidea") return "videas";
+  if (n === "videa") return "videa";
+  if (n === "ok" || n.indexOf("okru") >= 0) return "ok";
+  if (n.indexOf("mp4upload") >= 0) return "mp4upload";
+  if (n.indexOf("hgcloud") >= 0 || n.indexOf("streamhg") >= 0) return "hgcloud";
+  if (n.indexOf("mega") >= 0) return "mega";
+  if (n.indexOf("4shared") >= 0) return "4shared";
+  if (n.indexOf("yonaplay") >= 0) return "yonaplay";
+  if (n.indexOf("gofile") >= 0) return "gofile";
+  if (n.indexOf("workupload") >= 0) return "workupload";
+  if (n.indexOf("mediafire") >= 0) return "mediafire";
+  return n;
+}
+function serverPriority(dl, name) {
+  const f = hostFamily(name);
+  if (dl) return { gofile: 72, mega: 66, workupload: 62, mp4upload: 70, mediafire: 30 }[f] || 40;
+  return { "4shared": 80, yonaplay: 74, videas: 100, ok: 92, mega: 84, videa: 96, mp4upload: 90, hgcloud: 88 }[f] || 60;
+}
+function qualityRank(q) {
+  return { "4K": 400, UHD: 400, FHD: 300, HD: 200, SD: 100, "2160P": 400, "1080P": 300, "720P": 200, "480P": 100 }[String(q || "").toUpperCase().trim()] || 50;
+}
+
+function collectGroup(group, defVer, out) {
+  if (!group || typeof group !== "object") return;
+  const add = (map, dl) => {
+    if (!map || typeof map !== "object") return;
+    Object.keys(map).forEach((tab) => {
+      const arr = map[tab];
+      if (!Array.isArray(arr)) return;
+      arr.forEach((p) => {
+        if (!p || typeof p !== "object") return;
+        const token = String(p.token || "").trim();
+        const label = String(p.label || p.name || "").trim().toLowerCase();
+        if (!token || !label) return;
+        const version = String(p.version || defVer || "sub") || "sub";
+        const lang = String(p.lang || (version === "dub" ? "ar" : "jp"));
+        const T = String(tab).toUpperCase();
+        out.push({ token, label, tab: T, dl, version, lang, h: TAB_H[T] || 0 });
+      });
+    });
+  };
+  add(group.players, false);
+  add(group.downloads, true);
+}
+
+function collectTokens(j, out) {
+  if (!j || typeof j !== "object") return;
+  // Older payloads: players/downloads at the top level.
+  if (j.players || j.downloads) collectGroup(j, "sub", out);
+  // Current payloads can group everything per version (sub / dub / ...).
+  if (j.versions && typeof j.versions === "object") {
+    Object.keys(j.versions).forEach((ver) => collectGroup(j.versions[ver], ver, out));
+  }
+}
+
+function orderTokens(all) {
+  const seenTok = {};
+  const uniq = all.filter((t) => (seenTok[t.token + (t.dl ? "d" : "s")] ? false : (seenTok[t.token + (t.dl ? "d" : "s")] = 1)));
+  const streams = uniq.filter((t) => !t.dl);
+  const sKeys = {};
+  streams.forEach((t) => (sKeys[t.version + "|" + t.lang + "|" + t.tab + "|" + t.label] = 1));
+  // A download that duplicates a stream (same version, language, quality, host) adds nothing.
+  const downloads = uniq.filter((t) => t.dl && !sKeys[t.version + "|" + t.lang + "|" + t.tab + "|" + t.label]);
+
+  const byPrio = (a, b) =>
+    serverPriority(b.dl, b.label) - serverPriority(a.dl, a.label) || qualityRank(b.tab) - qualityRank(a.tab);
+  streams.sort(byPrio);
+  const best = [], rest = [], fam = {};
+  streams.forEach((t) => {
+    const k = t.version + "|" + hostFamily(t.label);
+    if (fam[k]) rest.push(t);
+    else { fam[k] = 1; best.push(t); }
+  });
+  rest.sort((a, b) => qualityRank(b.tab) - qualityRank(a.tab) || byPrio(a, b));
+  downloads.sort(byPrio);
+  const topGo = downloads.filter((t) => hostFamily(t.label) === "gofile")[0];
+  const otherDl = downloads.filter((t) => t !== topGo);
+  return best.concat(topGo ? [topGo] : [], rest, otherDl);
+}
+
 async function getTokens(page, csrf) {
-  const out = [];
   let activeCsrf = csrf || csrfOf(page.html);
-  // WitAnime sometimes returns a partial source list; retry once when Videa is absent.
+  let out = [];
+  // WitAnime sometimes returns a partial source list; retry once when nothing usable came back.
   for (let attempt = 1; attempt <= 2; attempt++) {
     let r = null, j = null;
     try {
@@ -458,43 +584,15 @@ async function getTokens(page, csrf) {
       } catch (e) {}
     }
 
-    const players = (j && j.players) || {};
-    Object.keys(players).forEach((tab) => {
-      (players[tab] || []).forEach((p) => {
-        if (!p || !p.token) return;
-        const label = String(p.label || "").toLowerCase();
-        const pri = SUPPORTED ? SUPPORTED.indexOf(label) : 0;
-        if (pri < 0) return;
-        out.push({ token: p.token, label, tab, version: p.version || "sub", lang: p.lang || "", pri, h: TAB_H[tab] || 0 });
-      });
-    });
-    const dls = (j && j.downloads) || {};
-    Object.keys(dls).forEach((tab) => {
-      (dls[tab] || []).forEach((p) => {
-        if (!p || !p.token) return;
-        const label = String(p.label || "").toLowerCase();
-        const pri = DL_SUPPORTED ? DL_SUPPORTED.indexOf(label) : 0;
-        if (pri < 0) return;
-        out.push({ token: p.token, label, tab, dl: true, version: p.version || "sub", lang: p.lang || "", pri, h: TAB_H[tab] || 0 });
-      });
-    });
+    out = [];
+    collectTokens(j, out);
     if (out.length || attempt === 2) break;
     await sleep(250);
   }
   page.csrf = activeCsrf;
-  out.sort((a, b) =>
-    (a.version === "sub" ? 0 : 1) - (b.version === "sub" ? 0 : 1) ||
-    (a.dl ? 1 : 0) - (b.dl ? 1 : 0) ||
-    a.pri - b.pri ||
-    b.h - a.h
-  );
-  const seen = {};
-  return out.filter((t) => {
-    const k = t.label + t.tab + t.version + (t.dl ? "d" : "s");
-    if (seen[k]) return false;
-    seen[k] = 1;
-    return true;
-  });
+  const ordered = orderTokens(out);
+  DIAG.push("tokens=" + out.length + " ordered=" + ordered.length);
+  return ordered;
 }
 
 function gateRaw(url, headers) {
@@ -526,13 +624,15 @@ function gateRaw(url, headers) {
 
 async function openGate(page, csrf, t) {
   const kind = t.dl ? "download" : "stream";
-  const gateUrl = `${BASE}/watch/${kind}-gate/${t.token}`;
+  const tok = encodeURIComponent(t.token);
+  let gateUrl = `${BASE}/watch/${kind}-gate/${tok}`;
+  let policy = "no-referrer";
   let activeCsrf = page.csrf || csrf;
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    if (attempt > 1) await sleep(350);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (attempt > 1) await sleep(attempt === 2 ? 600 : 1400);
     let sr;
     try {
-      sr = await fx(`${BASE}/watch/${kind}-source/${t.token}`, { method: "POST", headers: xhrHeaders(page, activeCsrf), body: "" }, 1, 9000);
+      sr = await fx(`${BASE}/watch/${kind}-source/${tok}`, { method: "POST", headers: xhrHeaders(page, activeCsrf), body: "" }, 1, 9000);
     } catch (e) {
       DIAG.push(t.label + " source net#" + attempt);
       continue;
@@ -549,14 +649,21 @@ async function openGate(page, csrf, t) {
           }
         } catch (e) {}
       }
-      if ((sr.status === 404 || sr.status === 419) && attempt === 2) return "";
-      continue;
+      if (sr.status === 404 && attempt >= 2) return null;
+      continue; // 429 / 419 / 5xx: wait and retry
     }
+    // The source response tells us which gate URL to open and which Referer policy it expects.
+    try {
+      const sj = JSON.parse(await sr.text());
+      if (sj && sj.gateUrl) gateUrl = absUrl(BASE + "/", cleanUrl(String(sj.gateUrl)));
+      if (sj && sj.referrerPolicy) policy = String(sj.referrerPolicy).toLowerCase();
+    } catch (e) {}
     await sleep(attempt === 1 ? 250 : 500);
 
     const gh = t.dl
       ? Object.assign({}, pageHeaders(page.url, "document", "same-origin"))
       : Object.assign({}, pageHeaders("", "iframe", "same-origin"));
+    if (!t.dl && policy === "origin") gh.Referer = BASE + "/";
     const ck = jarHeader();
     if (ck) gh["Cookie"] = ck;
 
@@ -580,14 +687,24 @@ async function openGate(page, csrf, t) {
       body = raw.body;
     }
 
+    if (status === 429) {
+      DIAG.push(t.label + " gate:429#" + attempt);
+      continue;
+    }
     if (!loc && body) {
-      const m = /url='([^']+)'|Redirecting to <a href="([^"]+)"/i.exec(body);
-      if (m) loc = m[1] || m[2];
+      // 200 page: the player is an <iframe src>, or a meta/JS redirect.
+      const m =
+        /<iframe[^>]+src=["']([^"']+)["']/i.exec(body) ||
+        /url='([^']+)'/i.exec(body) ||
+        /Redirecting to <a href="([^"]+)"/i.exec(body);
+      if (m) loc = m[1];
     }
     DIAG.push(t.label + " gate:" + status + "(" + via + ")" + (loc ? ":ok" : ":none") + "#" + attempt);
-    if (loc) return cleanUrl(loc);
+    if (loc) {
+      return { url: absUrl(gateUrl, cleanUrl(loc)), referer: policy === "origin" ? BASE + "/" : "" };
+    }
   }
-  return "";
+  return null;
 }
 
 // ---------- host resolvers ----------
@@ -917,6 +1034,142 @@ async function resolveVidea(embedUrl, pageRef) {
   return last;
 }
 
+// ---------- Videas (app.videas.com visitor API; ported from the original plugin) ----------
+function uuid4() {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === "x" ? r : (r & 3) | 8).toString(16);
+  });
+}
+function jsonUrlField(v) {
+  if (!v) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "object") return String(v.url || v.src || v.href || "");
+  return "";
+}
+
+async function resolveVideas(embedUrl, pageRef) {
+  const fail = (info) => ({ links: [], headers: { "User-Agent": UA_STR, Referer: embedUrl }, info });
+  const origin = /videas\.(?:com|fr)/i.test(embedUrl) ? originOf(embedUrl) : "https://app.videas.com";
+  const refHeaders = { "User-Agent": UA_STR, Referer: pageRef || BASE + "/", "Accept-Language": LANG, Accept: "text/html,*/*;q=0.8" };
+  let embedId = "", opening = "";
+  try {
+    const r = await fx(embedUrl, { headers: refHeaders }, 1, 10000);
+    const html = await r.text();
+    const sm = /<script[^>]*id=["']videas-embed-config["'][^>]*>([\s\S]*?)<\/script>/i.exec(html);
+    if (sm) {
+      try {
+        const cfg = JSON.parse(sm[1]);
+        embedId = String(cfg.embedId || "").trim();
+        opening = String(cfg.opening || "").trim();
+      } catch (e) {}
+    }
+  } catch (e) {}
+  if (!embedId) {
+    const m = /\/embed\/(?:media\/)?([0-9a-fA-F-]{20,})/.exec(embedUrl);
+    if (m) embedId = m[1];
+  }
+  if (!embedId) return fail("videas no embedId");
+
+  const apiHeaders = { "User-Agent": UA_STR, Accept: "application/json", Origin: origin, Referer: embedUrl };
+  if (opening) apiHeaders["X-Embed-Opening"] = opening;
+  let info;
+  try {
+    const r = await fx(origin + "/api/visitor/embed/" + embedId + "/?viewer_id=" + uuid4(), { headers: apiHeaders }, 1, 10000);
+    if (r.status >= 400) return fail("videas embed=" + r.status);
+    info = JSON.parse(await r.text());
+  } catch (e) {
+    return fail("videas embed err");
+  }
+  const token = String((info && info.playback_token) || "").trim();
+  const session = String((info && info.session_id) || "").trim();
+  const items = (info && info.items) || [];
+  const play = { "User-Agent": UA_STR, Referer: origin + "/", Origin: origin };
+  const links = [];
+  for (const it of items.slice(0, 4)) {
+    const uid = it && it.asset && it.asset.uid;
+    if (!uid) continue;
+    try {
+      const r = await fx(
+        origin + "/api/visitor/playback/info/",
+        {
+          method: "POST",
+          headers: Object.assign({}, apiHeaders, { "Content-Type": "application/json" }),
+          body: JSON.stringify({ asset_id: uid, playback_token: token, session_id: session }),
+        },
+        1,
+        10000
+      );
+      if (r.status >= 400) { DIAG.push("videas playback=" + r.status); continue; }
+      const pj = JSON.parse(await r.text());
+      let hls = jsonUrlField(pj.hls_url);
+      if (hls) {
+        if (hls[0] === "/") hls = origin + hls;
+        if (isPlayableMediaUrl(hls)) {
+          const ex = await expandHls(hls, play);
+          ex.forEach((l) => links.push(l));
+        }
+      }
+      let src = jsonUrlField(pj.source_url);
+      if (src) {
+        if (src[0] === "/") src = origin + src;
+        if (isPlayableMediaUrl(src)) links.push({ url: src, quality: "" });
+      }
+    } catch (e) {
+      DIAG.push("videas playback err");
+    }
+  }
+  return { links, headers: play, info: "videas items=" + items.length + " links=" + links.length };
+}
+
+// ---------- HGCloud / StreamHG family ----------
+async function resolveHgCloud(embedUrl, pageRef) {
+  const origin = originOf(embedUrl);
+  const idm = /\/(?:e|d|v)\/([A-Za-z0-9]+)/.exec(embedUrl);
+  const url = idm ? origin + "/e/" + idm[1] : embedUrl;
+  const play = { "User-Agent": UA_STR, Referer: origin + "/", Origin: origin };
+  let html = "", status = 0;
+  try {
+    const r = await fx(url, { headers: { "User-Agent": UA_STR, Referer: pageRef || BASE + "/", "Accept-Language": LANG, Accept: "text/html,*/*;q=0.8" } }, 2, 12000);
+    status = r.status;
+    html = await r.text();
+  } catch (e) {
+    return { links: [], headers: play, info: "hgcloud net" };
+  }
+  const text = cleanUrl(html + "\n" + unpack(html));
+  const found = [];
+  const add = (u) => {
+    u = cleanUrl(u);
+    if (!u) return;
+    if (u[0] === "/" && u[1] !== "/") u = origin + u;
+    else if (u.indexOf("//") === 0) u = "https:" + u;
+    if (isPlayableMediaUrl(u) && found.indexOf(u) < 0) found.push(u);
+  };
+  ["hls2", "file", "hls4", "hls3"].forEach((k) => {
+    const m = new RegExp("[\"']" + k + "[\"']\\s*:\\s*[\"']([^\"']+)[\"']", "i").exec(text);
+    if (m) add(m[1]);
+  });
+  const re = /https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*/gi;
+  let mm;
+  while ((mm = re.exec(text))) add(mm[0]);
+  const links = [];
+  for (const u of found.slice(0, 3)) {
+    if (/\.m3u8|\/stream\//i.test(u)) (await expandHls(u, play)).forEach((l) => links.push(l));
+    else links.push({ url: u, quality: "" });
+  }
+  return { links, headers: play, info: "hgcloud http=" + status + " found=" + found.length };
+}
+
+function hostKind(label, url) {
+  const l = String(label || "").toLowerCase();
+  const h = String(url || "").toLowerCase();
+  if (/videas\.(?:com|fr)/.test(h) || l.indexOf("videas") >= 0 || l === "svidea") return "videas";
+  if (/videa\.hu|videakid\.hu/.test(h) || l === "videa") return "videa";
+  if (/hgcloud\.|streamhg|vibuxer\.|hanerix\.|dintezuvio\.|cavanhabg\./.test(h) || l.indexOf("hgcloud") >= 0 || l.indexOf("streamhg") >= 0) return "hgcloud";
+  if (/mediafire\.com/.test(h) || l === "mediafire") return "mediafire";
+  return l;
+}
+
 // ---------- main ----------
 async function getStreams(tmdbId, mediaType, season, episode) {
   DIAG.length = 0;
@@ -972,21 +1225,27 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         if (index >= candidates.length) return;
         const t = candidates[index];
         try {
-          const embed = await openGate(page, csrf, t);
-          if (!embed) continue;
+          const gate = await openGate(page, csrf, t);
+          if (!gate || !gate.url) continue;
+          const embed = gate.url;
+          const kind = hostKind(t.label, embed);
           DIAG.push(t.label + (t.dl ? " dl " : " ") + t.tab + " url=" + embed.slice(0, 100));
           let res;
-          if (t.label === "mediafire") {
+          if (kind === "mediafire") {
             res = await resolveMediafire(embed);
-          } else if (t.label === "videa") {
+          } else if (kind === "videas") {
+            res = await resolveVideas(embed, gate.referer || page.url);
+          } else if (kind === "videa") {
             res = await resolveVidea(embed, page.url);
+          } else if (kind === "hgcloud") {
+            res = await resolveHgCloud(embed, gate.referer || page.url);
           } else {
             let eu = embed;
-            if (t.label === "mp4upload" && !/\/embed-/.test(eu)) {
+            if (kind.indexOf("mp4upload") >= 0 && !/\/embed-/.test(eu)) {
               const idm = /mp4upload\.com\/(?:embed-)?([A-Za-z0-9]+)/.exec(eu);
               if (idm) eu = "https://www.mp4upload.com/embed-" + idm[1] + ".html";
             }
-            res = await resolveCloudstreamHost(t.label, eu, page.url);
+            res = await resolveCloudstreamHost(kind, eu, page.url);
           }
           DIAG.push(t.label + " " + res.info + " links:" + res.links.length);
           const host = formatHostName(t.label);
@@ -994,7 +1253,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
             if (!isPlayableMediaUrl(l.url)) return;
             streams.push({
               name: "WitAnime - " + host,
-              title: host + " " + (t.label === "videa" && l.quality ? l.quality : t.tab) + (t.dl ? " dl" : "") + " (" + t.version + ")",
+              title: host + " " + ((t.label === "videa" || t.label === "videas") && l.quality ? l.quality : t.tab) + (t.dl ? " dl" : "") + " (" + t.version + ")",
               url: l.url,
               quality: l.quality || (t.h ? t.h + "p" : "auto"),
               headers: res.headers,
