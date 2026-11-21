@@ -120,9 +120,9 @@ function fail(msg) {
     " TD:" + typeof TextDecoder +
     " U8:" + typeof Uint8Array;
   return [
-    { name: "YTHD: " + msg, title: msg, url: "https://debug.invalid/ythd/1", quality: "debug" },
-    { name: "YTHD steps: " + (DIAG.join(">") || "none"), title: "steps", url: "https://debug.invalid/ythd/2", quality: "debug" },
-    { name: "YTHD env: " + env, title: "env", url: "https://debug.invalid/ythd/3", quality: "debug" },
+    { name: "YTHD v4: " + msg, title: msg, url: "https://debug.invalid/ythd/1", quality: "debug" },
+    { name: "YTHD v4 steps: " + (DIAG.join(">") || "none"), title: "steps", url: "https://debug.invalid/ythd/2", quality: "debug" },
+    { name: "YTHD v4 env: " + env, title: "env", url: "https://debug.invalid/ythd/3", quality: "debug" },
   ];
 }
 
@@ -176,7 +176,7 @@ async function getStreams(tmdbId, mediaType) {
       url: u,
       quality: q ? q + "p" : "HD",
       headers: { "User-Agent": UA, Referer: player },
-      provider: "ythd",
+      provider: "ythd4",
     }));
   } catch (e) {
     return fail("ERROR " + String((e && e.message) || e).slice(0, 100));
