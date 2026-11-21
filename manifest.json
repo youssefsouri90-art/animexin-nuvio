@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
-  "version": "1.4.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, witanime.site, anichi.cz)",
+  "version": "1.5.0",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, witanime.site, anichi.cz, hydrahd.gd)",
   "scrapers": [
     {
       "id": "animexin",
@@ -44,6 +44,17 @@
       "author": "you",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/anichi.js",
+      "enabled": true,
+      "formats": ["hls", "mp4"]
+    },
+    {
+      "id": "hydrahd",
+      "name": "HydraHD",
+      "description": "Movie and TV streams from hydrahd.gd through its available third-party servers",
+      "version": "1.0.0",
+      "author": "you",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/hydrahd.js",
       "enabled": true,
       "formats": ["hls", "mp4"]
     }
