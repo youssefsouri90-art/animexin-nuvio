@@ -1,128 +1,121 @@
-// HydraHD (VixSrc) provider for Nuvio - QuickJS-safe (no URL / URLSearchParams).
-// Returns only a real HLS playlist. Embed pages (iframes) are NOT returned
-// because the Nuvio player cannot play HTML pages.
+// YTHD provider for Nuvio (movies only for now). Test version.
+// Chain: ythd wrapper -> vs_src.php -> inner embed -> player page -> data API
+// -> decrypt stream_urls with the site's own WASM decryptor.
 
-const VIX = "https://vixsrc.to";
 const UA =
   "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36";
-
 const DIAG = [];
 
-function enc(x) {
-  return encodeURIComponent(String(x));
+async function get(url, headers) {
+  const r = await fetch(url, {
+    headers: Object.assign({ "User-Agent": UA }, headers || {}),
+  });
+  const t = await r.text();
+  if (!r.ok) DIAG.push("http" + r.status + ":" + url.slice(0, 50));
+  return { s: r.status, t };
 }
 
-function absVix(u) {
-  u = String(u || "");
-  if (/^https?:/i.test(u)) return u;
-  return VIX + (u[0] === "/" ? u : "/" + u);
+function unesc(s) {
+  return String(s).replace(/\\u0026/g, "&").replace(/\\\//g, "/");
 }
 
-async function resolveVixSrc(tmdbId, mediaType, season, episode) {
-  const s = Number(season) || 1;
-  const e = Number(episode) || 1;
-  const api =
-    mediaType === "movie"
-      ? `${VIX}/api/movie/${enc(tmdbId)}`
-      : `${VIX}/api/tv/${enc(tmdbId)}/${s}/${e}`;
-  const H = { "User-Agent": UA, Referer: VIX + "/" };
-
-  const apiRes = await fetch(api, { headers: H });
-  if (!apiRes.ok) {
-    DIAG.push("vix-api=" + apiRes.status);
-    return null;
-  }
-  let src = "";
-  try {
-    src = JSON.parse(await apiRes.text()).src;
-  } catch (err) {
-    DIAG.push("vix-api-json");
-    return null;
-  }
-  if (!src) {
-    DIAG.push("vix-no-src");
-    return null;
-  }
-
-  const embedRes = await fetch(absVix(src), { headers: H });
-  if (!embedRes.ok) {
-    DIAG.push("vix-embed=" + embedRes.status);
-    return null;
-  }
-  const html = await embedRes.text();
-  DIAG.push("embed-len=" + html.length);
-
-  // Params block: 'token': '...', 'expires': '...'
-  const pb = (/window\.masterPlaylist\s*=\s*\{\s*params\s*:\s*\{([\s\S]*?)\}/i.exec(html) || [])[1] || "";
-  const params = {};
-  const re = /['"]([^'"]+)['"]\s*:\s*['"]([^'"]*)['"]/g;
-  let m;
-  while ((m = re.exec(pb))) params[m[1]] = m[2];
-  if (!params.token) {
-    params.token = (/['"]token['"]\s*:\s*['"]([^'"]+)['"]/i.exec(html) || [])[1];
-    params.expires = (/['"]expires['"]\s*:\s*['"]([^'"]+)['"]/i.exec(html) || [])[1];
-  }
-  if (!params.token) {
-    DIAG.push("vix-no-token");
-    return null;
-  }
-
-  // Prefer the playlist url given by the page; fall back to the video id.
-  let base = (/window\.masterPlaylist[\s\S]*?\burl\s*:\s*['"]([^'"]+)['"]/i.exec(html) || [])[1];
-  if (!base) {
-    const id = (/window\.video\s*=\s*\{[\s\S]*?\bid["']?\s*:\s*["']?(\d+)/i.exec(html) || [])[1];
-    if (!id) {
-      DIAG.push("vix-no-id");
-      return null;
-    }
-    base = `${VIX}/playlist/${id}`;
-  }
-  base = absVix(base);
-
-  params.h = "1";
-  params.lang = "en";
-  const qs = Object.keys(params)
-    .filter((k) => params[k] !== "" && params[k] != null)
-    .map((k) => enc(k) + "=" + enc(params[k]))
-    .join("&");
-  const url = base + (base.indexOf("?") >= 0 ? "&" : "?") + qs;
-
-  DIAG.push("vix-hls");
-  return {
-    url,
-    headers: { "User-Agent": "ExoPlayerDemo/1.0", Referer: VIX + "/" },
-  };
+function b64(s) {
+  const bin = atob(s);
+  const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return u;
 }
 
-function fail(msg, dbg) {
+function utf8(bytes) {
+  if (typeof TextDecoder !== "undefined") return new TextDecoder().decode(bytes);
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return s; // URLs are plain ASCII
+}
+
+async function decryptUrls(encB64, wasmUrl, referer) {
+  if (typeof WebAssembly === "undefined") throw new Error("no WebAssembly");
+  const res = await fetch(wasmUrl, {
+    headers: { "User-Agent": UA, Referer: referer },
+  });
+  const bytes = await res.arrayBuffer();
+  let inst;
+  if (WebAssembly.compile) {
+    inst = await WebAssembly.instantiate(await WebAssembly.compile(bytes), {});
+  } else {
+    inst = (await WebAssembly.instantiate(bytes, {})).instance;
+  }
+  const ex = inst.exports;
+  const enc = b64(encB64);
+  const ptr = ex.alloc(enc.length);
+  new Uint8Array(ex.memory.buffer, ptr, enc.length).set(enc);
+  const n = ex.decrypt(ptr, enc.length);
+  return utf8(new Uint8Array(ex.memory.buffer, ptr + 12, n))
+    .split("\n")
+    .filter(Boolean);
+}
+
+function fail(msg) {
   return [
     {
-      name: "HydraHD debug",
-      title: (dbg || []).concat(msg, DIAG).join(" > "),
-      url: "https://debug.invalid/hydrahd",
+      name: "YTHD debug",
+      title: [msg].concat(DIAG).join(" > "),
+      url: "https://debug.invalid/ythd",
       quality: "debug",
     },
   ];
 }
 
-async function getStreams(tmdbId, mediaType, season, episode) {
+async function getStreams(tmdbId, mediaType) {
   DIAG.length = 0;
-  const dbg = ["id=" + tmdbId + " type=" + mediaType + " s=" + season + " e=" + episode];
   try {
-    const d = await resolveVixSrc(tmdbId, mediaType, season, episode);
-    if (!d) return fail("vixsrc failed", dbg);
-    return [
-      {
-        name: "HydraHD",
-        title: "VixSrc",
-        url: d.url,
-        quality: "Auto (HLS)",
-        headers: d.headers,
-        provider: "hydrahd",
-      },
-    ];
+    if (mediaType !== "movie") return fail("tv not supported yet");
+    const id = encodeURIComponent(String(tmdbId));
+    const wrap = `https://ythd.org/embed/${id}/`;
+
+    const a = await get(`https://ythd.org/vs_src.php?type=movie&id=${id}`, { Referer: wrap });
+    let inner;
+    try { inner = JSON.parse(a.t).src; } catch (e) { return fail("no inner src"); }
+    if (!inner) return fail("no inner src");
+
+    const ip = await get(inner, { Referer: wrap });
+    const pm = /"playerUrl":"([^"]+)"/.exec(ip.t);
+    if (!pm) return fail("no playerUrl");
+    const base = inner.replace(/^(https?:\/\/[^\/]+).*$/, "$1");
+    const playerUrl = unesc(pm[1]);
+    const player = /^https?:/i.test(playerUrl) ? playerUrl : base + playerUrl;
+
+    const pp = await get(player, { Referer: inner });
+    const tm = /"apiToken"\s*:\s*"([^"]+)"/.exec(pp.t);
+    const am = /"api"\s*:\s*"([^"]+)"/.exec(pp.t);
+    if (!tm || !am) return fail("no api/token");
+    const origin = player.replace(/^(https?:\/\/[^\/]+).*$/, "$1");
+
+    const api = unesc(am[1]) + "&api_token=" + encodeURIComponent(tm[1]);
+    const jr = await get(api, { Referer: player, Origin: origin, Accept: "application/json" });
+    let j;
+    try { j = JSON.parse(jr.t); } catch (e) { return fail("api not json"); }
+    if (!j || !j.data) return fail("api no data");
+
+    let urls = j.data.stream_urls;
+    if (typeof urls === "string") {
+      if (!j.vs || !j.vs.wasm_url) return fail("no wasm_url");
+      urls = await decryptUrls(urls, j.vs.wasm_url, player);
+    }
+    if (!urls || !urls.length) return fail("no urls");
+
+    const file = String(j.data.file_name || "");
+    const q = (/(\d{3,4})p/i.exec(file) || [])[1];
+    return urls.map((u, i) => ({
+      name: "YTHD",
+      title: "Server " + (i + 1) + (file ? " - " + file : ""),
+      url: u,
+      quality: q ? q + "p" : "HD",
+      headers: { "User-Agent": UA, Referer: player },
+      provider: "ythd",
+    }));
   } catch (e) {
-    return fail("ERROR " + String((e && e.message) || e).slice(0, 100), dbg);
+    return fail("ERROR " + String((e && e.message) || e).slice(0, 100));
   }
 }
 
