@@ -47,17 +47,3 @@
       "enabled": true,
       "formats": ["hls"]
     },
-    {
-      "id": "4khdhub",
-      "name": "4KHDHub",
-      "description": "4KHDHub direct links (fixed domain, allowlisted hosts, https only)",
-      "version": "1.1.0",
-      "author": "you",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "providers/4khdhub.js",
-      "enabled": true,
-      "formats": ["mkv"],
-      "contentLanguage": ["en"]
-    }
-  ]
-}
