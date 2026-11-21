@@ -114,6 +114,27 @@ async function getTitles(tmdbId, mediaType) {
   return res.slice(0, 6);
 }
 
+// ---------- Kitsu (Nuvio sends ids like "kitsu:3936:1" for anime) ----------
+async function getKitsuTitles(kitsuId) {
+  const r = await fetch(`https://kitsu.io/api/edge/anime/${kitsuId}`, {
+    headers: { Accept: "application/vnd.api+json" },
+  });
+  if (!r.ok) DIAG.push("kitsu http" + r.status);
+  const j = await r.json();
+  const a = (j && j.data && j.data.attributes) || {};
+  const t = a.titles || {};
+  const out = [t.en, t.en_jp, t.en_us, a.canonicalTitle].concat(a.abbreviatedTitles || []);
+  const seen = {}, res = [];
+  out.forEach((x) => {
+    if (!x) return;
+    const k = norm(x);
+    if (!k || seen[k]) return;
+    seen[k] = 1;
+    res.push(x);
+  });
+  return { titles: res.slice(0, 6), subtype: a.subtype || "" };
+}
+
 // ---------- site: search ----------
 async function searchSite(q) {
   const j = await ajaxJson(`${BASE}/ajax/search/suggest?keyword=${encodeURIComponent(q)}`);
@@ -368,15 +389,27 @@ async function getStreams(tmdbId, mediaType, season, episode) {
   };
 
   try {
-    const isTv = mediaType !== "movie";
-    const ep = isTv ? Number(episode) || 1 : 1;
-    dbg.push("tmdb=" + tmdbId + " s=" + season + " e=" + episode);
+    let isTv = mediaType !== "movie";
+    let ep = isTv ? Number(episode) || 1 : 1;
+    let seasonNum = Number(season) || 1;
+    dbg.push("id=" + tmdbId + " s=" + season + " e=" + episode);
 
-    const titles = await getTitles(tmdbId, isTv ? "tv" : "movie");
+    let titles;
+    const kp = /^kitsu:(\d+)(?::(\d+))?/i.exec(String(tmdbId));
+    if (kp) {
+      // Kitsu entries are already per-season, so no season matching needed
+      const k = await getKitsuTitles(kp[1]);
+      titles = k.titles;
+      seasonNum = 1;
+      isTv = k.subtype !== "movie";
+      ep = isTv ? Number(episode) || Number(kp[2]) || 1 : 1;
+    } else {
+      titles = await getTitles(tmdbId, isTv ? "tv" : "movie");
+    }
     dbg.push("titles=" + titles.join("|"));
     if (!titles.length) return fail("no titles");
 
-    const anime = await findAnime(titles, isTv ? "tv" : "movie", Number(season) || 1);
+    const anime = await findAnime(titles, isTv ? "tv" : "movie", seasonNum);
     dbg.push("anime=" + (anime ? anime.slug + "(" + anime.score.toFixed(2) + ")" : "none"));
     if (!anime) return fail("series not found");
 
