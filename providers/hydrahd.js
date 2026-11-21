@@ -33,6 +33,18 @@ function utf8(bytes) {
   return s; // URLs are plain ASCII
 }
 
+function desc(o) {
+  if (o == null) return String(o);
+  const k = [];
+  try { Object.getOwnPropertyNames(o).forEach((n) => k.push(n)); } catch (e) {}
+  try { for (const n in o) if (k.indexOf(n) < 0) k.push(n + "*"); } catch (e) {}
+  try {
+    const p = Object.getPrototypeOf(o);
+    if (p && p !== Object.prototype) Object.getOwnPropertyNames(p).forEach((n) => k.push("p." + n));
+  } catch (e) {}
+  return k.slice(0, 14).join("|");
+}
+
 async function getBytes(res) {
   const has = [];
   ["arrayBuffer", "bytes", "blob"].forEach((k) => {
@@ -89,12 +101,15 @@ async function decryptUrls(encB64, wasmUrl, referer) {
   }
   tries.push(async () => {
     const r = await WebAssembly.instantiate(bytes, {});
+    DIAG.push("r:" + typeof r + "{" + desc(r) + "}");
+    if (r && r.instance) DIAG.push("inst{" + desc(r.instance) + "} exp{" + desc(r.instance.exports) + "}");
+    if (r && r.exports) DIAG.push("rexp{" + desc(r.exports) + "}");
     return r && r.instance ? r.instance : r;
   });
   for (let i = 0; i < tries.length; i++) {
     try {
       const inst = await tries[i]();
-      const e = inst && inst.exports;
+      const e = (inst && inst.exports) || inst;
       const names = e ? Object.getOwnPropertyNames(e) : [];
       DIAG.push("try" + i + ":names=" + names.join("|") + ",alloc=" + typeof (e && e.alloc) + ",dec=" + typeof (e && e.decrypt) + ",mem=" + typeof (e && e.memory));
       if (e && typeof e.alloc === "function" && typeof e.decrypt === "function") { ex = e; break; }
@@ -120,9 +135,9 @@ function fail(msg) {
     " TD:" + typeof TextDecoder +
     " U8:" + typeof Uint8Array;
   return [
-    { name: "YTHD v4: " + msg, title: msg, url: "https://debug.invalid/ythd/1", quality: "debug" },
-    { name: "YTHD v4 steps: " + (DIAG.join(">") || "none"), title: "steps", url: "https://debug.invalid/ythd/2", quality: "debug" },
-    { name: "YTHD v4 env: " + env, title: "env", url: "https://debug.invalid/ythd/3", quality: "debug" },
+    { name: "YTHD v5: " + msg, title: msg, url: "https://debug.invalid/ythd/1", quality: "debug" },
+    { name: "YTHD v5 steps: " + (DIAG.join(">") || "none"), title: "steps", url: "https://debug.invalid/ythd/2", quality: "debug" },
+    { name: "YTHD v5 env: " + env, title: "env", url: "https://debug.invalid/ythd/3", quality: "debug" },
   ];
 }
 
@@ -176,7 +191,7 @@ async function getStreams(tmdbId, mediaType) {
       url: u,
       quality: q ? q + "p" : "HD",
       headers: { "User-Agent": UA, Referer: player },
-      provider: "ythd4",
+      provider: "ythd5",
     }));
   } catch (e) {
     return fail("ERROR " + String((e && e.message) || e).slice(0, 100));
