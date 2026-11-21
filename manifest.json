@@ -1,13 +1,13 @@
 {
   "name": "Animexin Nuvio",
-  "version": "1.2.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, witanime.site)",
+  "version": "1.3.0",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, witanime.site, guts.to)",
   "scrapers": [
     {
       "id": "animexin",
       "name": "Animexin",
-      "description": "Donghua and anime (EN/ID hardsub) from animexin.dev",
-      "version": "1.1.0",
+      "description": "Donghua and anime (EN/ID hardsub) from animexin.dev, with WeTV subtitles",
+      "version": "1.2.0",
       "author": "you",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/animexin.js",
@@ -17,8 +17,8 @@
     {
       "id": "donghuaworld",
       "name": "DonghuaWorld",
-      "description": "Donghua with quality options up to 4K from donghuaworld.com",
-      "version": "1.1.0",
+      "description": "Donghua with quality options up to 4K from donghuaworld.com, with WeTV subtitles",
+      "version": "1.2.0",
       "author": "you",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/donghuaworld.js",
@@ -33,6 +33,17 @@
       "author": "you",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/witanime.js",
+      "enabled": true,
+      "formats": ["hls", "mp4"]
+    },
+    {
+      "id": "guts",
+      "name": "Guts",
+      "description": "Subbed anime from guts.to (MuL-AuD, Vidplay, DatSaV, DGHG)",
+      "version": "1.0.0",
+      "author": "you",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/guts.js",
       "enabled": true,
       "formats": ["hls", "mp4"]
     }
