@@ -6,6 +6,7 @@
 //   -> /ajax/server/list?servers=<token>     (server link-ids)
 //   -> /ajax/server?get=<link-id>            (embed url)
 //   -> <embed>/stream/getSources?id=<data-id of embed page> -> m3u8 + subs
+// v2: also adds an external Arabic subtitle track (OpenSubtitles.com, Wyzie as fallback).
 
 const BASE = "https://anichi.cz";
 const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
@@ -505,6 +506,128 @@ async function probe(url, hdrs) {
   }
 }
 
+// ---------- External Arabic subtitles (OpenSubtitles.com, Wyzie as fallback) ----------
+const EXT_SUBS = true; // set to false to disable the external Arabic track
+const OS_API_KEY = "p3XAEclHlMLgcbKZkP9y11t1XORnzgxs";
+const OS_API = "https://api.opensubtitles.com/api/v1";
+const OS_UA = "AnichiNuvio v1.0"; // the API requires an app name + version here
+const OS_MAX_DOWNLOADS = 2; // each /download call uses daily quota, so keep this low
+const OS_CACHE_MS = 60 * 60 * 1000; // reuse links for 1 hour to save quota
+const SUB_TIMEOUT_MS = 10000;
+const OS_CACHE = {};
+
+// setTimeout may not exist in QuickJS, so it is guarded.
+function withTimeout(promise, ms, fallback) {
+  if (typeof setTimeout !== "function") return promise;
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
+function arSub(url, label) {
+  if (!url || !/^https?:\/\//i.test(url)) return null;
+  return { url: url, lang: "ar", language: "ar", label: label, name: label };
+}
+
+// ctx = { tmdb: "<tmdb id or empty for kitsu>", isTv, season, ep, title }
+async function fetchOpenSubtitlesArabic(ctx) {
+  const cacheKey = (ctx.tmdb || norm(ctx.title)) + ":" + (ctx.isTv ? ctx.season + ":" + ctx.ep : "m");
+  const hit = OS_CACHE[cacheKey];
+  if (hit && Date.now() - hit.t < OS_CACHE_MS) return hit.subs;
+
+  const headers = {
+    "Api-Key": OS_API_KEY,
+    "User-Agent": OS_UA,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+  try {
+    // Query params must be lowercase and alphabetically ordered for this API.
+    let q;
+    if (ctx.tmdb) {
+      q = ctx.isTv
+        ? "episode_number=" + ctx.ep + "&languages=ar&parent_tmdb_id=" + encodeURIComponent(ctx.tmdb) +
+          "&season_number=" + ctx.season + "&type=episode"
+        : "languages=ar&tmdb_id=" + encodeURIComponent(ctx.tmdb) + "&type=movie";
+    } else {
+      // Kitsu ids carry no TMDB id, so search by title instead (less exact).
+      const qt = encodeURIComponent(String(ctx.title || "").toLowerCase());
+      q = ctx.isTv
+        ? "episode_number=" + ctx.ep + "&languages=ar&query=" + qt + "&type=episode"
+        : "languages=ar&query=" + qt + "&type=movie";
+    }
+    const res = await fetch(OS_API + "/subtitles?" + q, { headers: headers });
+    if (!res.ok) { DIAG.push("os-search:" + res.status); return []; }
+    const j = JSON.parse(await res.text());
+    const rows = (j && j.data) || [];
+
+    // Best first: trusted uploaders, then most downloaded. Skip machine translations.
+    const cands = [];
+    rows.forEach((row) => {
+      const a = (row && row.attributes) || {};
+      const f = a.files && a.files[0];
+      if (!f || !f.file_id || a.ai_translated || a.machine_translated) return;
+      cands.push({ fileId: f.file_id, trusted: a.from_trusted ? 1 : 0, dl: a.download_count || 0 });
+    });
+    cands.sort((x, y) => y.trusted - x.trusted || y.dl - x.dl);
+
+    const subs = [];
+    for (let i = 0; i < cands.length && subs.length < OS_MAX_DOWNLOADS; i++) {
+      try {
+        const dr = await fetch(OS_API + "/download", {
+          method: "POST",
+          headers: headers,
+          body: JSON.stringify({ file_id: cands[i].fileId, sub_format: "srt" }),
+        });
+        if (!dr.ok) {
+          DIAG.push("os-dl:" + dr.status);
+          if (dr.status === 406) break; // daily download quota reached
+          continue;
+        }
+        const dj = JSON.parse(await dr.text());
+        const s = arSub(dj && dj.link, "العربية " + (subs.length + 1) + " (OpenSubtitles)");
+        if (s) subs.push(s);
+      } catch (e) { /* try the next candidate */ }
+    }
+    if (subs.length) OS_CACHE[cacheKey] = { t: Date.now(), subs: subs };
+    return subs;
+  } catch (e) {
+    DIAG.push("os-err");
+    return [];
+  }
+}
+
+// Wyzie Subs searches by TMDB id only, so it is skipped for Kitsu ids.
+async function fetchWyzieArabic(ctx) {
+  if (!ctx.tmdb) return [];
+  try {
+    let u = "https://sub.wyzie.ru/search?id=" + encodeURIComponent(ctx.tmdb) + "&language=ar&format=srt&source=all";
+    if (ctx.isTv) u += "&season=" + ctx.season + "&episode=" + ctx.ep;
+    const res = await fetch(u, { headers: { "User-Agent": UA["User-Agent"], Accept: "application/json" } });
+    if (!res.ok) return [];
+    const arr = JSON.parse(await res.text());
+    const out = [], seen = {};
+    for (let i = 0; i < (arr || []).length && out.length < 3; i++) {
+      const it = arr[i] || {};
+      if (!it.url || seen[it.url]) continue;
+      seen[it.url] = 1;
+      const s = arSub(it.url, "العربية " + (out.length + 1) + (it.source ? " (" + it.source + ")" : ""));
+      if (s) out.push(s);
+    }
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
+// OpenSubtitles first; Wyzie only if OpenSubtitles returned nothing.
+async function fetchArabicSubs(ctx) {
+  const os = await fetchOpenSubtitlesArabic(ctx);
+  if (os.length) return os;
+  return fetchWyzieArabic(ctx);
+}
+
 // ---------- entry point ----------
 async function getStreams(tmdbId, mediaType, season, episode) {
   const dbg = [];
@@ -548,6 +671,21 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     dbg.push("titles=" + titles.join("|") + (anilist ? " al=" + anilist : ""));
     if (!titles.length) return fail("no titles");
 
+    // Start the external Arabic subtitle search now so it runs while the site is queried.
+    const subPromise = EXT_SUBS
+      ? withTimeout(
+          fetchArabicSubs({
+            tmdb: kp ? "" : String(tmdbId),
+            isTv: isTv,
+            season: seasonNum,
+            ep: ep,
+            title: titles[0],
+          }),
+          SUB_TIMEOUT_MS,
+          []
+        ).catch(() => [])
+      : Promise.resolve([]);
+
     const anime = await findAnime(titles, seasonNum, anilist, ep, isTv);
     dbg.push("anime=" + (anime ? anime.slug + "(" + anime.score.toFixed(2) + (anime.exact ? ",id" : "") + ")" : "none"));
     if (!anime) return fail("series not found");
@@ -560,6 +698,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     if (!servers.length) return fail("no servers");
 
     const results = await Promise.all(servers.map(async (s) => ({ s, r: await resolveServer(s, anime.slug, ep) })));
+    const extSubs = await subPromise;
 
     const streams = [], seenUrl = {};
     results.forEach(({ s, r }) => {
@@ -575,7 +714,9 @@ async function getStreams(tmdbId, mediaType, season, episode) {
           headers: l.hdrs || UA,
           provider: "anichi",
         };
-        if (SITE_SUBS && r.tracks.length) st.subtitles = r.tracks;
+        // Site tracks first, then the external Arabic track(s).
+        const subs = (SITE_SUBS ? r.tracks : []).concat(extSubs);
+        if (subs.length) st.subtitles = subs;
         streams.push(st);
       });
     });
