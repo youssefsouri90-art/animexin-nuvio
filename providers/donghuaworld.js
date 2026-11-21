@@ -2,9 +2,15 @@
 // Flow: TMDB title -> search donghuaworld.com -> series page (/anime/slug/)
 //       -> episode pages (4K pages first) -> Dailymotion / Rumble / generic embed
 //       -> HLS master or direct files -> quality list.
+// + WeTV subtitles: fetched from a local Termux server (yt-dlp) and attached
+//   to every stream as `subtitles`.
 
 const BASE = "https://donghuaworld.com";
 const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
+
+// Local Termux server that returns WeTV subtitles (see wetv_server.py).
+const SUBS_API = "http://127.0.0.1:8787";
+
 // Site / TMDB / generic players: the original mobile UA (known to work with donghuaworld.com).
 const UA = {
   "User-Agent":
@@ -54,6 +60,30 @@ async function getTitles(tmdbId, mediaType) {
     `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${TMDB_KEY}`
   )).json();
   return [j.name || j.title, j.original_name || j.original_title].filter(Boolean);
+}
+
+// ---------- WeTV subtitles (local Termux server) ----------
+// Never throws: on any failure returns [] so playback is not affected.
+async function getSubtitles(tmdbId, episode) {
+  try {
+    const r = await fetch(
+      `${SUBS_API}/subs?tmdb=${encodeURIComponent(tmdbId)}&ep=${encodeURIComponent(episode || 1)}`
+    );
+    const j = await r.json();
+    if (!Array.isArray(j)) { DIAG.push("subs:bad"); return []; }
+    DIAG.push("subs:" + j.length);
+    // several field names, to cover whatever shape the host app reads
+    return j.map((s) => ({
+      url: s.url,
+      lang: s.lang,
+      language: s.lang,
+      label: s.label,
+      name: s.label,
+    }));
+  } catch (e) {
+    DIAG.push("subs:err");
+    return [];
+  }
 }
 
 // ---------- site ----------
@@ -410,6 +440,11 @@ async function getStreams(tmdbId, mediaType, season, episode) {
   DIAG.length = 0;
   const fail = (m) => [{ name: "DonghuaWorld DEBUG", title: dbg.concat(m).join(" > "), url: "https://debug.invalid/", quality: "debug" }];
   try {
+    dbg.push("tmdb=" + tmdbId + " s=" + season + " e=" + episode);
+
+    // Start fetching WeTV subtitles right away, in parallel with everything else.
+    const subsP = mediaType === "tv" ? getSubtitles(tmdbId, episode) : Promise.resolve([]);
+
     const titles = await getTitles(tmdbId, mediaType);
     dbg.push("titles=" + titles.join("|"));
     if (!titles.length) return fail("no titles");
@@ -425,6 +460,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
     const streams = [];
     let top = 0;
+    let subs = null; // resolved lazily, once the first stream is about to be built
     for (const pageUrl of pages) {
       const embeds = extractEmbeds(await getText(pageUrl));
       DIAG.push("page " + pageUrl.replace(BASE, "") + " embeds[" + embeds.map(hostOf).join(",") + "]");
@@ -432,6 +468,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       for (const e of embeds) {
         const links = await resolve(e, pageUrl);
         links.sort((a, b) => b.height - a.height);
+        if (links.length && subs === null) subs = await subsP;
         links.forEach((l) => {
           top = Math.max(top, l.height || 0);
           streams.push({
@@ -441,11 +478,13 @@ async function getStreams(tmdbId, mediaType, season, episode) {
             quality: l.quality,
             headers: l.hdrs || UA,
             provider: "donghuaworld",
+            subtitles: subs || [],
           });
         });
       }
       if (top >= 1400) break; // got 2K/4K, no need to check other pages
     }
+    if (subs === null) subs = await subsP; // keep DIAG complete even when nothing resolved
     if (!streams.length) return [{ name: "DEBUG " + DIAG.join(" | ").slice(0, 1200), title: dbg.concat("no playable streams").join(" > "), url: "https://debug.invalid/", quality: "debug" }];
     streams.push({ name: "INFO " + DIAG.join(" | ").slice(0, 1200), title: DIAG.join(" | ").slice(0, 1200), url: "https://debug.invalid/", quality: "info" });
     return streams;
