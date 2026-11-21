@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
   "version": "1.7.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, witanime.site, anichi.cz, hydrahd.gd)",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz) and movies & TV (cinema.army)",
   "scrapers": [
     {
       "id": "animexin",
@@ -26,17 +26,6 @@
       "formats": ["hls", "mp4"]
     },
     {
-      "id": "witanime",
-      "name": "WitAnime",
-      "description": "Arabic-subbed anime from witanime.site (Dailymotion, Rumble, Dood, Mp4upload, OK.ru and more)",
-      "version": "1.0.0",
-      "author": "you",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "providers/witanime.js",
-      "enabled": true,
-      "formats": ["hls", "mp4"]
-    },
-    {
       "id": "anichi",
       "name": "Anichi",
       "description": "Anime streams from anichi.cz with subtitle tracks and quality options up to 1080p",
@@ -48,15 +37,15 @@
       "formats": ["hls", "mp4"]
     },
     {
-      "id": "hydrahd",
-      "name": "HydraHD",
-      "description": "Movie and TV streams from hydrahd.gd through its available third-party servers",
+      "id": "cinemaarmy",
+      "name": "CinemaArmy",
+      "description": "Movie and TV streams from cinema.army with HLS quality options up to 1080p",
       "version": "1.0.0",
       "author": "you",
       "supportedTypes": ["movie", "tv"],
-      "filename": "providers/hydrahd.js",
+      "filename": "providers/cinemaarmy.js",
       "enabled": true,
-      "formats": ["hls", "mp4"]
+      "formats": ["hls"]
     }
   ]
 }
