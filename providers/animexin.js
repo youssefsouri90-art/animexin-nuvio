@@ -2,9 +2,14 @@
 // Flow: TMDB title -> search animexin.dev -> episode page -> decode server
 // <option> values (base64 iframe) -> keep ONLY the allowed servers
 // (Dailymotion AX / Rumble AX / Dood AX) -> resolve -> quality list.
+// + WeTV subtitles: fetched from a local Termux server (yt-dlp) and attached
+//   to every stream as `subtitles`.
 
 const BASE = "https://animexin.dev";
 const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
+
+// Local Termux server that returns WeTV subtitles (see wetv_server.py).
+const SUBS_API = "http://127.0.0.1:8787";
 
 // Site / TMDB / Rumble / Dood: mobile UA (works with the site).
 const UA = {
@@ -82,6 +87,30 @@ async function getTitles(tmdbId, mediaType) {
   );
   const j = await r.json();
   return [j.name || j.title, j.original_name || j.original_title].filter(Boolean);
+}
+
+// ---------- WeTV subtitles (local Termux server) ----------
+// Never throws: on any failure returns [] so playback is not affected.
+async function getSubtitles(tmdbId, episode) {
+  try {
+    const r = await fetch(
+      `${SUBS_API}/subs?tmdb=${encodeURIComponent(tmdbId)}&ep=${encodeURIComponent(episode || 1)}`
+    );
+    const j = await r.json();
+    if (!Array.isArray(j)) { DIAG.push("subs:bad"); return []; }
+    DIAG.push("subs:" + j.length);
+    // several field names, to cover whatever shape the host app reads
+    return j.map((s) => ({
+      url: s.url,
+      lang: s.lang,
+      language: s.lang,
+      label: s.label,
+      name: s.label,
+    }));
+  } catch (e) {
+    DIAG.push("subs:err");
+    return [];
+  }
 }
 
 // ---------- site ----------
@@ -384,6 +413,11 @@ async function getStreams(tmdbId, mediaType, season, episode) {
   DIAG.length = 0;
   const fail = (m) => [{ name: "Animexin DEBUG", title: dbg.concat(m, DIAG).join(" > ").slice(0, 1200), url: "https://debug.invalid/", quality: "debug" }];
   try {
+    dbg.push("tmdb=" + tmdbId + " s=" + season + " e=" + episode);
+
+    // Start fetching WeTV subtitles right away, in parallel with everything else.
+    const subsP = mediaType === "tv" ? getSubtitles(tmdbId, episode) : Promise.resolve([]);
+
     const titles = await getTitles(tmdbId, mediaType);
     dbg.push("titles=" + titles.join("|"));
     if (!titles.length) return fail("no titles");
@@ -405,6 +439,8 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     const results = await Promise.all(
       servers.map(async (s) => ({ s, links: await resolve(s, pageUrl) }))
     );
+    const subs = await subsP;
+
     const streams = [];
     results.forEach(({ s, links }) => {
       links.sort((a, b) => b.height - a.height);
@@ -416,6 +452,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
           quality: l.quality,
           headers: l.hdrs || UA,
           provider: "animexin",
+          subtitles: subs,
         })
       );
     });
