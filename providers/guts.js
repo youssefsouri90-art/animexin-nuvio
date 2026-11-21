@@ -198,19 +198,39 @@ async function findAnime(titles, mediaType, season) {
 }
 
 // ---------- site: servers / sources ----------
+// Every server of every SUB-type block is used (SUB, S-Sub, ...).
+// Set INCLUDE_DUB to true to also get the DUB block.
+const INCLUDE_DUB = false;
+
 async function getServers(movieId, ep) {
   const j = await ajaxJson(`${BASE}/ajax/v2/episode/servers?episodeId=${ep}&mov_id=${movieId}`);
   if (!j || !j.html) return [];
   const html = Array.isArray(j.html) ? j.html.join("") : String(j.html);
-  const re = /data-type="(\w+)"[^>]*?data-id="([0-9a-f]+)"[^>]*?data-server-id="(\d+)"[^>]*>\s*<a[^>]*>([^<]*)<\/a>/g;
-  const out = [];
-  let m;
-  while ((m = re.exec(html))) {
-    if (m[1] !== "sub") continue; // SUB only, never DUB
-    if (ALLOWED.indexOf(m[3]) < 0) continue;
-    out.push({ type: m[1], id: m[2], sid: m[3], name: decodeEntities(m[4]).trim() });
+  const blockRe = /<div class="ps_-block\b[^"]*">([\s\S]*?)(?=<div class="ps_-block\b|$)/g;
+  const itemRe = /data-type="([^"]*)"[^>]*?data-id="([0-9a-f]+)"[^>]*?data-server-id="(\d+)"[^>]*>\s*<a[^>]*>([^<]*)<\/a>/g;
+  const out = [], seenBlocks = [];
+  let bm;
+  while ((bm = blockRe.exec(html))) {
+    const body = bm[1];
+    const title = decodeEntities((/ps__-title[^>]*>([\s\S]*?)<\/div>/.exec(body) || [])[1] || "")
+      .replace(/<[^>]+>/g, "").trim();
+    const names = [];
+    let m;
+    itemRe.lastIndex = 0;
+    const items = [];
+    while ((m = itemRe.exec(body))) {
+      const nm = decodeEntities(m[4]).trim();
+      names.push(nm);
+      items.push({ type: m[1], id: m[2], sid: m[3], name: nm, block: title });
+    }
+    seenBlocks.push(title + "[" + names.join(",") + "]");
+    if (!INCLUDE_DUB && /dub/i.test(title)) continue;
+    items.forEach((it) => out.push(it));
   }
-  out.sort((a, b) => ALLOWED.indexOf(a.sid) - ALLOWED.indexOf(b.sid));
+  DIAG.push("blocks=" + seenBlocks.join(" "));
+  // known/working servers first, then the rest in site order
+  const rank = (x) => { const i = ALLOWED.indexOf(x.sid); return i < 0 ? 99 : i; };
+  out.sort((a, b) => rank(a) - rank(b));
   return out;
 }
 
@@ -247,7 +267,10 @@ async function expandHls(masterUrl, hdrs) {
       const avc = /avc1/i.test(line);
       const cur = byHeight[h];
       if (!cur || (avc && !cur.avc) || (avc === cur.avc && bw > cur.bw)) {
-        byHeight[h] = { url: absUrl(masterUrl, next), height: h, bw: bw, avc: avc };
+        let vu = absUrl(masterUrl, next);
+        // some players detect HLS only if the url contains "m3u8"
+        if (!/m3u8/i.test(vu)) vu += (vu.indexOf("?") < 0 ? "?" : "&") + "v.m3u8";
+        byHeight[h] = { url: vu, height: h, bw: bw, avc: avc };
       }
     }
     const hs = Object.keys(byHeight).map(Number).sort((x, y) => y - x);
@@ -358,11 +381,42 @@ async function resolveServer(s) {
   try {
     const link = await getSourceLink(s.id);
     if (!link) { DIAG.push(s.name + ":nolink"); return { links: [], tracks: [] }; }
-    if (/vhscdn\./i.test(link)) return await resolveVhs(link);
+    DIAG.push(s.name + " host=" + hostOf(link) + " path=" + link.replace(/^https?:\/\/[^\/]+/, "").slice(0, 25));
     if (/playmogo|dood|d000d|ds2play|dsvplay|d0o0d|do7go|vide0\.net/i.test(hostOf(link))) return await resolveDood(link);
-    DIAG.push(s.name + ":unsupported " + hostOf(link));
+    // vhscdn and unknown hosts: try the /<x>/getSources pattern
+    return await resolveVhs(link);
   } catch (e) { DIAG.push(s.name + " err " + (e && e.message)); }
   return { links: [], tracks: [] };
+}
+
+// ---------- link probe (diagnostics) ----------
+// Set to false once everything works.
+const PROBE = true;
+
+async function probe(url, hdrs) {
+  try {
+    const r = await fetch(url, { headers: hdrs });
+    let info = String(r.status);
+    if (/m3u8/i.test(url)) {
+      const t = await r.text();
+      const first = t.split(/\r?\n/).map((s) => s.trim()).filter((s) => s && s[0] !== "#")[0];
+      if (!first) return info + "/empty";
+      const r2 = await fetch(absUrl(url, first), { headers: hdrs });
+      info += "/" + r2.status;
+      if (/m3u8/i.test(first)) {
+        // master -> media playlist -> first segment
+        const t2 = await r2.text();
+        const seg = t2.split(/\r?\n/).map((s) => s.trim()).filter((s) => s && s[0] !== "#")[0];
+        if (seg) {
+          const r3 = await fetch(absUrl(absUrl(url, first), seg), { headers: hdrs });
+          info += "/" + r3.status;
+        }
+      }
+    }
+    return info;
+  } catch (e) {
+    return "ERR " + String((e && e.message) || "").slice(0, 25);
+  }
 }
 
 // ---------- entry point ----------
@@ -415,7 +469,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
     const servers = await getServers(anime.id, ep);
     dbg.push("servers=" + servers.map((s) => s.name).join(","));
-    if (!servers.length) return fail("no SUB servers");
+    if (!servers.length) return fail("no servers");
 
     const results = await Promise.all(servers.map(async (s) => ({ s, r: await resolveServer(s) })));
 
@@ -427,7 +481,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         seenUrl[l.url] = 1;
         const st = {
           name: "Guts",
-          title: s.name + " (SUB)",
+          title: s.name + " (" + s.block + ")",
           url: l.url,
           quality: l.quality,
           headers: l.hdrs || UA,
@@ -437,10 +491,38 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         streams.push(st);
       });
     });
+    if (PROBE && streams.length) {
+      await Promise.all(
+        streams.slice(0, 8).map(async (st, i) => {
+          const res = await probe(st.url, st.headers);
+          st.name = "Guts [" + res + "] " + hostOf(st.url).slice(0, 14);
+        })
+      );
+    }
     return streams.length ? streams : fail("no playable streams");
   } catch (e) {
     return fail("ERROR " + (e && e.message));
   }
 }
 
-module.exports = { getStreams };
+// Debug helper (Termux only): prints the raw servers HTML for a kitsu id
+async function dumpServers(kitsuId, ep) {
+  const k = await getKitsuTitles(kitsuId);
+  const anime = await findAnime(k.titles, "tv", 1);
+  if (!anime) return { error: "not found", titles: k.titles };
+  const j = await ajaxJson(`${BASE}/ajax/v2/episode/servers?episodeId=${ep || 1}&mov_id=${anime.id}`);
+  const html = j && j.html ? (Array.isArray(j.html) ? j.html.join("") : String(j.html)) : "";
+  return { slug: anime.slug, html: html.replace(/\s+/g, " ") };
+}
+
+async function dumpByTitle(title, ep) {
+  const anime = await findAnime([title], "tv", 1);
+  if (!anime) return { slug: "NOT FOUND", html: "" };
+  const j = await ajaxJson(`${BASE}/ajax/v2/episode/servers?episodeId=${ep || 1}&mov_id=${anime.id}`);
+  const html = j && j.html ? (Array.isArray(j.html) ? j.html.join("") : String(j.html)) : "";
+  // keep only block titles + server names + ids (drop the long data-id hashes)
+  const short = html.replace(/data-id="[0-9a-f]+"/g, 'data-id="…"').replace(/\s+/g, " ");
+  return { slug: anime.slug + " (score " + anime.score.toFixed(2) + ")", html: short };
+}
+
+module.exports = { getStreams, DIAG, dumpServers, dumpByTitle };
