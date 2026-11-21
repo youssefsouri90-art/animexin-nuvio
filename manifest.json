@@ -46,4 +46,4 @@
       "filename": "providers/cinemaarmy.js",
       "enabled": true,
       "formats": ["hls"]
-    },
+    }
