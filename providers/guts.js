@@ -50,6 +50,7 @@ function similarity(a, b) {
 
 async function getText(url, headers) {
   const r = await fetch(url, { headers: Object.assign({}, UA, headers || {}) });
+  if (!r.ok) DIAG.push("http" + r.status + ":" + url.replace(BASE, "").slice(0, 30));
   return await r.text();
 }
 
@@ -347,12 +348,25 @@ async function resolveServer(s) {
 async function getStreams(tmdbId, mediaType, season, episode) {
   const dbg = [];
   DIAG.length = 0;
-  const fail = (m) => [{
-    name: "Guts DEBUG",
-    title: dbg.concat(m, DIAG).join(" > ").slice(0, 1200),
-    url: "https://debug.invalid/",
-    quality: "debug",
-  }];
+
+  // Debug output: Nuvio shows only name/quality, so the message is split
+  // across several fake streams' `name` field (60 chars each).
+  const fail = (m) => {
+    const msg = dbg.concat(m, DIAG).join(" > ");
+    const out = [];
+    for (let i = 0; i < 6; i++) {
+      const part = msg.slice(i * 60, (i + 1) * 60);
+      if (!part) break;
+      out.push({
+        name: "DBG" + (i + 1) + " " + part,
+        title: msg,
+        url: "https://debug.invalid/" + (i + 1),
+        quality: "debug",
+      });
+    }
+    return out;
+  };
+
   try {
     const isTv = mediaType !== "movie";
     const ep = isTv ? Number(episode) || 1 : 1;
