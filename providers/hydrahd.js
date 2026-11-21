@@ -249,7 +249,9 @@ async function resolveVixSrc(tmdbId, mediaType, season, episode) {
       // on some Nuvio playback paths.
       headers: {
         "User-Agent": "ExoPlayerDemo/1.0",
-        Referer: embedUrl,
+        // A static site referer is accepted by the playlist and does not
+        // expire with the short-lived embed token.
+        Referer: "https://vixsrc.to/",
       },
     };
   } catch (e) {
