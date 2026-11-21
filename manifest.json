@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
-  "version": "1.8.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz), movies & TV (cinema.army) and 4K/HD movies & TV (4khdhub), with Arabic subtitles on selected providers",
+  "version": "1.7.0",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz) and movies & TV (cinema.army)",
   "scrapers": [
     {
       "id": "animexin",
@@ -28,8 +28,8 @@
     {
       "id": "anichi",
       "name": "Anichi",
-      "description": "Anime streams from anichi.cz with subtitle tracks (plus external Arabic subtitles) and quality options up to 1080p",
-      "version": "1.1.0",
+      "description": "Anime streams from anichi.cz with subtitle tracks and quality options up to 1080p",
+      "version": "1.0.0",
       "author": "you",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/anichi.js",
@@ -39,11 +39,13 @@
     {
       "id": "cinemaarmy",
       "name": "CinemaArmy",
-      "description": "Movie and TV streams from cinema.army with detected HLS quality options up to 1080p and external Arabic subtitles",
-      "version": "1.2.0",
+      "description": "Movie and TV streams from cinema.army with HLS quality options up to 1080p",
+      "version": "1.0.0",
       "author": "you",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/cinemaarmy.js",
       "enabled": true,
       "formats": ["hls"]
     }
+  ]
+}
