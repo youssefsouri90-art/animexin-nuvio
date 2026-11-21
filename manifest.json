@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
-  "version": "1.3.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, witanime.site, guts.to)",
+  "version": "1.4.0",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, witanime.site, anichi.cz)",
   "scrapers": [
     {
       "id": "animexin",
@@ -37,13 +37,13 @@
       "formats": ["hls", "mp4"]
     },
     {
-      "id": "guts",
-      "name": "Guts",
-      "description": "Subbed anime from guts.to (MuL-AuD, Vidplay, DatSaV, DGHG)",
+      "id": "anichi",
+      "name": "Anichi",
+      "description": "Anime streams from anichi.cz with subtitle tracks and quality options up to 1080p",
       "version": "1.0.0",
       "author": "you",
       "supportedTypes": ["movie", "tv"],
-      "filename": "providers/guts.js",
+      "filename": "providers/anichi.js",
       "enabled": true,
       "formats": ["hls", "mp4"]
     }
