@@ -244,10 +244,13 @@ async function resolveVixSrc(tmdbId, mediaType, season, episode) {
       name: "VixSrc",
       quality: "Auto (HLS)",
       url: playlist.toString(),
-      headers: Object.assign({}, UA, {
+      // VixSrc rejects okhttp/Android default agents. ExoPlayerDemo is
+      // accepted by the CDN and avoids the duplicate User-Agent issue seen
+      // on some Nuvio playback paths.
+      headers: {
+        "User-Agent": "ExoPlayerDemo/1.0",
         Referer: embedUrl,
-        Origin: "https://vixsrc.to",
-      }),
+      },
     };
   } catch (e) {
     DIAG.push("vix-error=" + String(e && e.message || e).slice(0, 80));
