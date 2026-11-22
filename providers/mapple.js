@@ -231,7 +231,10 @@ const BROWSER = Object.assign({}, UA, {
 
 // Source ids tried in order. The site has added s16/s19/s25/s27/s28 since the
 // original provider was written; omitting them was the main reason for sparse results.
-const SOURCES = ["s1", "s8", "s2", "s3", "s4", "s9", "s10", "s12", "s16", "s19", "s25", "s27", "s28", "s6", "s7"];
+// "mapple" is the site's default source and was missing from the old list.
+// Put the newer/high-quality sources first so the first response is not limited
+// to the older 720p providers while the remaining sources are still loading.
+const SOURCES = ["mapple", "s28", "s25", "s27", "s19", "s16", "s1", "s8", "s2", "s3", "s4", "s9", "s10", "s12", "s6", "s7"];
 // Try several working servers. The old value (3) often returned too few choices.
 const MAX_OK = 6;
 const SITE_SUBS = true;
