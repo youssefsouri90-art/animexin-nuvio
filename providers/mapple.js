@@ -240,6 +240,12 @@ const MAX_OK = 6;
 const SITE_SUBS = true;
 const PROBE = false; // probing burns the short-lived token and can make playback less reliable
 
+// OpenSubtitles application API. Search is free; anonymous downloads have a
+// small quota, so fetch at most one Arabic and one English file per title/episode.
+const OS_BASE = "https://api.opensubtitles.com/api/v1";
+const OS_API_KEY = "p3XAEclHlMLgcbKZkP9y11t1XORnzgxs";
+const OS_LANGS = ["ar", "en"];
+
 const DIAG = [];
 
 function hostOf(u) {
@@ -286,6 +292,87 @@ async function api(sess, method, path, body) {
   let json = null;
   try { json = JSON.parse(text); } catch (e) {}
   return { status: r.status, text: text, json: json };
+}
+
+function osHeaders() {
+  return {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    "Api-Key": OS_API_KEY,
+    "User-Agent": "Nuvio Mapple Provider v1.0",
+  };
+}
+
+async function osRequest(method, path, body) {
+  try {
+    const r = await fetch(OS_BASE + path, {
+      method: method,
+      headers: osHeaders(),
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await r.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch (e) {}
+    return { status: r.status, json: json };
+  } catch (e) {
+    return { status: 0, json: null };
+  }
+}
+
+function osLang(value) {
+  const s = String(value || "").toLowerCase().replace(/_/g, "-");
+  if (s === "ara" || s === "ar" || s.indexOf("ar-") === 0) return "ar";
+  if (s === "eng" || s === "en" || s.indexOf("en-") === 0) return "en";
+  return s.slice(0, 2);
+}
+
+function osSubtitleItem(item) {
+  const a = item && item.attributes ? item.attributes : {};
+  const files = Array.isArray(a.files) ? a.files : [];
+  const file = files[0] || {};
+  const lang = osLang(a.language || a.lang || file.language);
+  return {
+    lang: lang,
+    language: lang,
+    label: lang === "ar" ? "Arabic (OpenSubtitles)" : "English (OpenSubtitles)",
+    name: lang === "ar" ? "Arabic (OpenSubtitles)" : "English (OpenSubtitles)",
+    fileId: file.file_id || file.fileId || a.file_id || item.id,
+    score: Number(a.download_count || 0),
+  };
+}
+
+async function fetchOpenSubtitles(id, isTv, season, episode) {
+  try {
+    const q = [
+      "tmdb_id=" + encodeURIComponent(String(id)),
+      "languages=" + encodeURIComponent(OS_LANGS.join(",")),
+      "order_by=download_count",
+      "order_direction=desc",
+    ];
+    if (isTv) {
+      q.push("season_number=" + encodeURIComponent(String(Number(season) || 1)));
+      q.push("episode_number=" + encodeURIComponent(String(Number(episode) || 1)));
+    }
+    const search = await withTimeout(osRequest("GET", "/subtitles?" + q.join("&")), 4500);
+    const rows = search && search.json && Array.isArray(search.json.data) ? search.json.data : [];
+    const best = {};
+    rows.forEach((row) => {
+      const item = osSubtitleItem(row);
+      if (!item.fileId || OS_LANGS.indexOf(item.lang) < 0) return;
+      if (!best[item.lang] || item.score > best[item.lang].score) best[item.lang] = item;
+    });
+    const candidates = OS_LANGS.map((lang) => best[lang]).filter(Boolean);
+    const downloaded = await Promise.all(candidates.map(async (item) => {
+      const r = await withTimeout(osRequest("POST", "/download", { file_id: Number(item.fileId), sub_format: "srt" }), 4500);
+      // OpenSubtitles returns link at the top level (not inside data).
+      const d = r && r.json ? (r.json.data || r.json) : {};
+      const url = d.link || d.url || d.download_url;
+      return url ? { url: url, lang: item.lang, language: item.lang, label: item.label, name: item.name } : null;
+    }));
+    return downloaded.filter(Boolean);
+  } catch (e) {
+    return [];
+  }
 }
 
 async function openSession(pagePath) {
@@ -443,6 +530,10 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     const scope = isTv ? (Number(season) || 1) + "-" + (Number(episode) || 1) : "";
     dbg.push(type + " " + id + (scope ? " " + scope : ""));
 
+    // Start subtitle lookup before Mapple's proof-of-work so it does not add
+    // another serial network phase to stream discovery.
+    const externalSubsPromise = fetchOpenSubtitles(id, isTv, season, episode);
+
     // Mapple's TV route is /watch/tv/<id>-<season>-<episode>.
     // /watch/tv/<id> returns "Invalid Path Format" and produces unusable TV tokens.
     const pagePath = isTv ? "/watch/tv/" + id + "-" + scope : "/watch/movie/" + id;
@@ -451,6 +542,8 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
     let mtoken = await getMediaToken(sess, id, type, scope);
     if (!mtoken) return fail("no media token");
+
+    const externalSubs = await externalSubsPromise;
 
     const found = [];
     // Do not wait for every source sequentially: one dead server used to keep
@@ -480,6 +573,9 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       const full = absUrl(BASE + "/", su);
       const PH = Object.assign({}, UA, { Referer: BASE + "/", Origin: BASE });
       const subs = SITE_SUBS ? toSubtitles(f.data) : [];
+      externalSubs.forEach((s) => {
+        if (!subs.some((x) => x.url === s.url)) subs.push(s);
+      });
       const links = /m3u8|playlist/i.test(full) ? await expandHls(full, PH) : [{ url: full, quality: "Direct", height: 0 }];
       if (SITE_SUBS && links.subtitles && links.subtitles.length) {
         links.subtitles.forEach((s) => {
