@@ -5,6 +5,9 @@
 // v2: detects real qualities from the HLS master playlist so Nuvio shows them.
 // v3: Arabic subtitles come from external sources, fetched in parallel with the servers:
 //     OpenSubtitles.com (API key) first, Wyzie Subs as fallback. Site-provided tracks are added too.
+// v4: if the master playlist keeps audio in separate renditions (EXT-X-MEDIA TYPE=AUDIO with URI),
+//     return the master itself (one entry per server) so the audio is not lost. Per-quality
+//     entries are only created when the audio is muxed into the variants.
 
 const API = "https://cinema.army/api";
 const SITE = "https://cinema.army/";
@@ -161,6 +164,9 @@ function resolveUrl(base, ref) {
 
 // Returns [{ url, height, bandwidth }] sorted best-first,
 // or [] if the url is not a master playlist or the fetch fails.
+// Extra properties on the returned array:
+//   .subs      Arabic subtitle tracks declared in the master
+//   .extAudio  true when audio lives in separate renditions (variants alone would be silent)
 async function parseMaster(url, headers) {
   try {
     const res = await fetch(url, { headers });
@@ -170,13 +176,19 @@ async function parseMaster(url, headers) {
     const lines = text.split(/\r?\n/);
     const out = [];
     out.subs = [];
+    out.extAudio = false;
     for (let i = 0; i < lines.length; i++) {
-      if (lines[i].indexOf("#EXT-X-MEDIA") === 0 && /TYPE=SUBTITLES/i.test(lines[i])) {
-        const um = lines[i].match(/URI="([^"]+)"/i);
-        const lm = lines[i].match(/LANGUAGE="([^"]*)"/i);
-        const nm = lines[i].match(/NAME="([^"]*)"/i);
-        const sub = makeSub(um && resolveUrl(url, um[1]), (lm && lm[1]) || "", (nm && nm[1]) || "");
-        if (sub && isArabic(sub.lang + " " + sub.label)) out.subs.push(sub);
+      if (lines[i].indexOf("#EXT-X-MEDIA") === 0) {
+        if (/TYPE=AUDIO/i.test(lines[i]) && /URI="[^"]+"/i.test(lines[i])) {
+          out.extAudio = true;
+        }
+        if (/TYPE=SUBTITLES/i.test(lines[i])) {
+          const um = lines[i].match(/URI="([^"]+)"/i);
+          const lm = lines[i].match(/LANGUAGE="([^"]*)"/i);
+          const nm = lines[i].match(/NAME="([^"]*)"/i);
+          const sub = makeSub(um && resolveUrl(url, um[1]), (lm && lm[1]) || "", (nm && nm[1]) || "");
+          if (sub && isArabic(sub.lang + " " + sub.label)) out.subs.push(sub);
+        }
         continue;
       }
       if (lines[i].indexOf("#EXT-X-STREAM-INF") !== 0) continue;
@@ -379,7 +391,7 @@ function fail(results) {
     .map((r) => r.srv.key + ":" + (r.err || (r.url ? "ok" : "?")))
     .join(" ");
   return [
-    { name: "CinemaArmy v3: " + sum, title: "debug", url: "https://debug.invalid/ca", quality: "debug" },
+    { name: "CinemaArmy v4: " + sum, title: "debug", url: "https://debug.invalid/ca", quality: "debug" },
   ];
 }
 
@@ -420,7 +432,29 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       const list = [];
       const variants = await parseMaster(r.url, hdrs);
       const subs = (r.subs || []).concat((variants && variants.subs) || []);
-      if (variants.length) {
+      if (variants.length && variants.extAudio) {
+        // Audio is in separate renditions: the variant urls alone would play without sound,
+        // so keep the master playlist (one entry per server). The player picks the quality.
+        const q = variants[0].height ? heightToQuality(variants[0].height) : FALLBACK_QUALITY;
+        const seenQ = {};
+        const all = [];
+        variants.forEach((v) => {
+          const vq = v.height ? heightToQuality(v.height) : FALLBACK_QUALITY;
+          if (!seenQ[vq]) {
+            seenQ[vq] = true;
+            all.push(vq);
+          }
+        });
+        list.push({
+          name: "CinemaArmy " + q,
+          title: r.srv.name + " - " + q + " (Auto: " + all.join(", ") + ")",
+          url: r.url,
+          quality: q,
+          headers: hdrs,
+          subtitles: subs,
+          provider: "cinemaarmy",
+        });
+      } else if (variants.length) {
         const seen = {};
         variants.forEach((v) => {
           const q = v.height ? heightToQuality(v.height) : FALLBACK_QUALITY;
