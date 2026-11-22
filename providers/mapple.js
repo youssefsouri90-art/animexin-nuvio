@@ -229,12 +229,13 @@ const BROWSER = Object.assign({}, UA, {
   Referer: BASE + "/",
 });
 
-// Source ids tried in order (names are unknown, the site serves them as s1..s13).
-// Known from tests: s5 and s13 disabled, s11 unknown. Stops after MAX_OK working sources.
-const SOURCES = ["s1", "s8", "s2", "s3", "s4", "s9", "s10", "s12", "s6", "s7"];
-const MAX_OK = 3;
+// Source ids tried in order. The site has added s16/s19/s25/s27/s28 since the
+// original provider was written; omitting them was the main reason for sparse results.
+const SOURCES = ["s1", "s8", "s2", "s3", "s4", "s9", "s10", "s12", "s16", "s19", "s25", "s27", "s28", "s6", "s7"];
+// Try several working servers. The old value (3) often returned too few choices.
+const MAX_OK = 8;
 const SITE_SUBS = true;
-const PROBE = true; // writes the HTTP status of the final link into the stream name (debug)
+const PROBE = false; // probing burns the short-lived token and can make playback less reliable
 
 const DIAG = [];
 
@@ -243,7 +244,9 @@ function hostOf(u) {
   return m ? m[1] : u;
 }
 function absUrl(base, rel) {
+  if (!rel) return "";
   if (/^https?:/i.test(rel)) return rel;
+  if (/^\/\//.test(rel)) return "https:" + rel;
   if (rel[0] === "/") return base.replace(/^(https?:\/\/[^\/]+).*/, "$1") + rel;
   return base.replace(/[^\/]*$/, "") + rel;
 }
@@ -364,17 +367,25 @@ async function expandHls(masterUrl, hdrs) {
 }
 
 function toSubtitles(d) {
-  const arr = (d && (d.subtitles || d.tracks || d.captions)) || [];
+  // Mapple has used more than one spelling/shape for subtitle tracks over time.
+  const raw = d && (d.subtitles || d.subtitle || d.subtitleTracks || d.captionTracks || d.tracks || d.captions);
+  const arr = Array.isArray(raw) ? raw : (raw && typeof raw === "object" ? Object.keys(raw).map((k) => raw[k]) : []);
   const out = [];
   (Array.isArray(arr) ? arr : []).forEach((t) => {
-    const u = t && (t.url || t.file || t.src);
+    if (typeof t === "string") t = { url: t };
+    const u0 = t && (t.url || t.file || t.src || t.uri || t.path);
+    const u = u0 ? absUrl(BASE + "/", String(u0)) : "";
     if (!u) return;
-    const label = String(t.label || t.lang || t.language || "und");
+    const label = String(t.label || t.name || t.lang || t.language || t.locale || "und");
     const kind = String(t.kind || "").toLowerCase();
     if (kind === "thumbnails") return;
-    const lang = String(t.lang || t.language || label).toLowerCase().slice(0, 2);
-    out.push({ url: u, lang: lang, language: lang, label: label, name: label });
+    const lang0 = String(t.lang || t.language || t.locale || label).toLowerCase().replace(/_/g, "-");
+    const lang = lang0.length === 3 ? ({eng:"en",ara:"ar",fre:"fr",fra:"fr",spa:"es",ger:"de",deu:"de",ita:"it",por:"pt",rus:"ru",tur:"tr"}[lang0] || lang0.slice(0, 2)) : lang0.slice(0, 2);
+    const key = u + "|" + lang;
+    if (out.some((x) => x._key === key)) return;
+    out.push({ url: u, lang: lang, language: lang, label: label, name: label, _key: key });
   });
+  out.forEach((x) => { delete x._key; });
   return out;
 }
 
@@ -410,7 +421,10 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     const scope = isTv ? (Number(season) || 1) + "-" + (Number(episode) || 1) : "";
     dbg.push(type + " " + id + (scope ? " " + scope : ""));
 
-    const sess = await openSession(isTv ? "/watch/tv/" + id : "/watch/movie/" + id);
+    // Mapple's TV route is /watch/tv/<id>-<season>-<episode>.
+    // /watch/tv/<id> returns "Invalid Path Format" and produces unusable TV tokens.
+    const pagePath = isTv ? "/watch/tv/" + id + "-" + scope : "/watch/movie/" + id;
+    const sess = await openSession(pagePath);
     if (!sess) return fail("no session");
 
     let mtoken = await getMediaToken(sess, id, type, scope);
@@ -445,7 +459,9 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       links.forEach((l) => {
         if (seen[l.url]) return;
         seen[l.url] = 1;
-        const st = { name: "Mapple " + f.src, title: "Mapple " + f.src, url: l.url, quality: l.quality, headers: PH, provider: "mapple" };
+        const sourceQuality = f.data.quality || f.data.resolution || f.data.height;
+        const q = l.quality === "Direct" && sourceQuality ? String(sourceQuality).match(/^\d+$/) ? qualityLabel(Number(sourceQuality)) : String(sourceQuality) : l.quality;
+        const st = { name: "Mapple " + f.src, title: "Mapple " + f.src, url: l.url, quality: q, headers: PH, provider: "mapple" };
         if (subs.length) st.subtitles = subs;
         streams.push(st);
       });
