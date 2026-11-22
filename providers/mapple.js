@@ -302,7 +302,9 @@ async function openSession(pagePath) {
 
 // media-session token: proof of work, valid ~120 s
 async function getMediaToken(sess, id, type, scope) {
-  const base = { mediaId: id, mediaType: type, mediaScope: scope, requestToken: sess.requestToken };
+  // Mapple's current API calls this field tv_slug. Sending mediaScope causes
+  // HTTP 400 "Invalid media" for every TV episode.
+  const base = { mediaId: id, mediaType: type, tv_slug: scope, requestToken: sess.requestToken };
   const c = await api(sess, "POST", "/api/media-session", base);
   if (!c.json || !c.json.pow) { DIAG.push("ms " + c.status + " " + String(c.text).slice(0, 40)); return ""; }
   const nonce = solvePow(c.json.pow.challenge, c.json.pow.difficulty);
@@ -334,12 +336,23 @@ async function fetchSource(sess, mtoken, id, type, scope, src) {
 // ---------- HLS ----------
 async function expandHls(masterUrl, hdrs) {
   const out = [{ url: masterUrl, quality: "Auto", height: 0 }];
+  out.subtitles = [];
   try {
     const r = await fetch(masterUrl, { headers: hdrs });
     const txt = await r.text();
     if (txt.indexOf("#EXTM3U") !== 0) { DIAG.push("m3u8? " + r.status); return out; }
     if (txt.indexOf("#EXT-X-STREAM-INF") < 0) return out; // already a media playlist
     const lines = txt.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.indexOf("#EXT-X-MEDIA:") !== 0 || !/TYPE=SUBTITLES/i.test(line)) continue;
+      const uri = /URI="([^"]+)"/i.exec(line);
+      if (!uri) continue;
+      const lang0 = ((/LANGUAGE="([^"]+)"/i.exec(line) || [0, "und"])[1] || "und").toLowerCase();
+      const lang = lang0.length === 3 ? ({eng:"en",ara:"ar",fre:"fr",fra:"fr",spa:"es",ger:"de",deu:"de",ita:"it",por:"pt",rus:"ru",tur:"tr"}[lang0] || lang0.slice(0, 2)) : lang0.slice(0, 2);
+      const name = ((/NAME="([^"]+)"/i.exec(line) || [0, lang])[1] || lang);
+      out.subtitles.push({ url: absUrl(masterUrl, uri[1]), lang: lang, language: lang, label: name, name: name });
+    }
     const byHeight = {};
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -455,6 +468,11 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       const PH = Object.assign({}, UA, { Referer: BASE + "/", Origin: BASE });
       const subs = SITE_SUBS ? toSubtitles(f.data) : [];
       const links = /m3u8|playlist/i.test(full) ? await expandHls(full, PH) : [{ url: full, quality: "Direct", height: 0 }];
+      if (SITE_SUBS && links.subtitles && links.subtitles.length) {
+        links.subtitles.forEach((s) => {
+          if (!subs.some((x) => x.url === s.url)) subs.push(s);
+        });
+      }
       links.sort((a, b) => (b.height || 0) - (a.height || 0));
       links.forEach((l) => {
         if (seen[l.url]) return;
