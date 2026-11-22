@@ -260,6 +260,12 @@ function qualityLabel(h) {
   return h + "p";
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve({ fail: "TIMEOUT" }), ms)),
+  ]);
+}
 
 // ---------- session (cookie + request token) ----------
 function createSession() { return { cookie: "", requestToken: "" }; }
@@ -444,20 +450,22 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     if (!mtoken) return fail("no media token");
 
     const found = [];
-    for (let i = 0; i < SOURCES.length && found.length < MAX_OK; i++) {
-      const src = SOURCES[i];
-      let res = await fetchSource(sess, mtoken, id, type, scope, src);
-      if (res.badToken) { // token expired or rejected: get a new one and retry once
-        mtoken = await getMediaToken(sess, id, type, scope);
-        if (!mtoken) break;
-        res = await fetchSource(sess, mtoken, id, type, scope, src);
-      }
-      if (!res.data && /SOURCE_BUSY|TIMEOUT|COOLDOWN/.test(res.fail || "") && res.retry && res.retry <= 6) {
-        await sleep(res.retry * 1000);
-        res = await fetchSource(sess, mtoken, id, type, scope, src);
-      }
-      DIAG.push(src + ":" + (res.data ? "ok" : res.fail));
-      if (res.data) found.push({ src: src, data: res.data });
+    // Do not wait for every source sequentially: one dead server used to keep
+    // Nuvio on "Finding streams..." until its global timeout.
+    for (let i = 0; i < SOURCES.length && found.length < MAX_OK; i += 4) {
+      const batch = SOURCES.slice(i, i + 4);
+      const results = await Promise.all(batch.map(async (src) => {
+        let res = await withTimeout(fetchSource(sess, mtoken, id, type, scope, src), 9000);
+        if (!res.data && /SOURCE_BUSY|COOLDOWN/.test(res.fail || "") && res.retry && res.retry <= 3) {
+          await sleep(res.retry * 1000);
+          res = await withTimeout(fetchSource(sess, mtoken, id, type, scope, src), 9000);
+        }
+        return { src: src, res: res };
+      }));
+      results.forEach((x) => {
+        DIAG.push(x.src + ":" + (x.res.data ? "ok" : x.res.fail));
+        if (x.res.data && found.length < MAX_OK) found.push({ src: x.src, data: x.res.data });
+      });
     }
     if (!found.length) return fail("no source worked");
 
