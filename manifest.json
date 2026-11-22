@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
-  "version": "1.7.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz) and movies & TV (cinema.army)",
+  "version": "1.8.0",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz) and movies & TV (cinema.army, mapple)",
   "scrapers": [
     {
       "id": "animexin",
@@ -46,6 +46,17 @@
       "filename": "providers/cinemaarmy.js",
       "enabled": true,
       "formats": ["hls"]
+    },
+    {
+      "id": "mapple",
+      "name": "Mapple",
+      "description": "Movie and TV streams from Mapple",
+      "version": "1.0.0",
+      "author": "you",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/mapple.js",
+      "enabled": true,
+      "formats": ["hls", "mp4"]
     }
   ]
 }
