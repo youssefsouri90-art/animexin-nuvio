@@ -233,7 +233,7 @@ const BROWSER = Object.assign({}, UA, {
 // original provider was written; omitting them was the main reason for sparse results.
 const SOURCES = ["s1", "s8", "s2", "s3", "s4", "s9", "s10", "s12", "s16", "s19", "s25", "s27", "s28", "s6", "s7"];
 // Try several working servers. The old value (3) often returned too few choices.
-const MAX_OK = 8;
+const MAX_OK = 6;
 const SITE_SUBS = true;
 const PROBE = false; // probing burns the short-lived token and can make playback less reliable
 
@@ -452,13 +452,15 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     const found = [];
     // Do not wait for every source sequentially: one dead server used to keep
     // Nuvio on "Finding streams..." until its global timeout.
-    for (let i = 0; i < SOURCES.length && found.length < MAX_OK; i += 4) {
-      const batch = SOURCES.slice(i, i + 4);
+    // Two larger batches keep the provider below Nuvio's stream-discovery
+    // timeout when several Mapple upstreams are cooling down at once.
+    for (let i = 0; i < SOURCES.length && found.length < MAX_OK; i += 8) {
+      const batch = SOURCES.slice(i, i + 8);
       const results = await Promise.all(batch.map(async (src) => {
-        let res = await withTimeout(fetchSource(sess, mtoken, id, type, scope, src), 9000);
+        let res = await withTimeout(fetchSource(sess, mtoken, id, type, scope, src), 6500);
         if (!res.data && /SOURCE_BUSY|COOLDOWN/.test(res.fail || "") && res.retry && res.retry <= 3) {
           await sleep(res.retry * 1000);
-          res = await withTimeout(fetchSource(sess, mtoken, id, type, scope, src), 9000);
+          res = await withTimeout(fetchSource(sess, mtoken, id, type, scope, src), 6500);
         }
         return { src: src, res: res };
       }));
