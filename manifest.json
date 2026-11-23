@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
   "version": "2.0.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz) and movies & TV (cinema.army, mapple, redflix)",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, anime3rb.com) and movies & TV (cinema.army, mapple, redflix)",
   "scrapers": [
     {
       "id": "animexin",
@@ -68,6 +68,17 @@
       "filename": "providers/redflix.js",
       "enabled": true,
       "formats": ["hls"]
+    },
+    {
+      "id": "anime3rb",
+      "name": "Anime3rb",
+      "description": "Anime MP4 streams from anime3rb.com (vid3rb) via local Termux Node.js server",
+      "version": "1.0.0",
+      "author": "you",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/anime3rb.js",
+      "enabled": true,
+      "formats": ["mp4"]
     }
   ]
 }
