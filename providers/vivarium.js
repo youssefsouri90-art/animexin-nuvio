@@ -16,6 +16,13 @@ const PROVIDERS = [
   { key: "tethys", label: "Tethys", def: true },
   { key: "theia", label: "Theia", def: true },
   { key: "tyche", label: "Tyche", def: true },
+  { key: "iris", label: "Iris", def: true },
+  { key: "hermes", label: "Hermes", def: true },
+  { key: "leto", label: "Leto", def: true },
+  { key: "phoebe", label: "Phoebe", def: true },
+  { key: "eos", label: "Eos", def: true },
+  { key: "hestia", label: "Hestia", def: true },
+  { key: "hello", label: "hello", def: true },
 ];
 
 const LANGUAGES = [
@@ -236,7 +243,10 @@ function findTmdbIdFromExternal(source, value, isTv) {
           if (!d) return null;
           return {
             title: d.title_english || d.title || "",
-            year: (d.year || (d.aired && d.aired.prop && d.aired.prop.from && d.aired.prop.from.year) || ""),
+            year:
+              d.year ||
+              (d.aired && d.aired.prop && d.aired.prop.from && d.aired.prop.from.year) ||
+              "",
           };
         });
     } else if (source === "anilist") {
@@ -600,7 +610,7 @@ function createRunner() {
     headers["x-cv"] = "94092f52501e";
     if (nonce) headers["x-nonce"] = nonce;
     headers["x-sig"] = signRequest("GET", path, timestamp, nonce || "");
-    return fetchWithTimeout(BASE_URL + path, { headers: headers }, 7000);
+    return fetchWithTimeout(BASE_URL + path, { headers: headers }, 8000);
   }
 
   function fetchNonces() {
