@@ -74,39 +74,6 @@ function parseFirestoreDoc(doc) {
   return out;
 }
 
-async function getMalTitlesViaAniList(malId) {
-  const cleanId = String(malId || "").replace(/^mal[:_-]?/i, "").trim();
-  if (!/^\d+$/.test(cleanId)) return [];
-  try {
-    const res = await fetch("https://graphql.anilist.co", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "User-Agent": UA["User-Agent"],
-      },
-      body: JSON.stringify({
-        query:
-          "query ($idMal: Int) { Media(idMal: $idMal, type: ANIME) { title { romaji english native } synonyms } }",
-        variables: { idMal: Number(cleanId) },
-      }),
-    });
-    if (!res.ok) return [];
-    const j = await res.json();
-    const media = j && j.data && j.data.Media;
-    if (!media) return [];
-    const t = media.title || {};
-    return dedupeTitles([
-      t.english,
-      t.romaji,
-      t.native,
-      ...(Array.isArray(media.synonyms) ? media.synonyms : []),
-    ]);
-  } catch (e) {
-    return [];
-  }
-}
-
 async function getKitsuTitles(kitsuId) {
   const cleanId = String(kitsuId || "").replace(/^kitsu[:_-]?/i, "").trim();
   if (!/^\d+$/.test(cleanId)) return [];
@@ -124,15 +91,72 @@ async function getKitsuTitles(kitsuId) {
     const j = await res.json();
     const attrs = (j && j.data && j.data.attributes) || {};
     const titlesObj = attrs.titles || {};
-    return dedupeTitles([
+    const list = [
       titlesObj.en,
       attrs.canonicalTitle,
       titlesObj.en_jp,
       titlesObj.ja_jp,
-      ...(Array.isArray(attrs.abbreviatedTitles)
-        ? attrs.abbreviatedTitles
-        : []),
-    ]);
+    ];
+    if (Array.isArray(attrs.abbreviatedTitles)) {
+      attrs.abbreviatedTitles.forEach(function (x) {
+        list.push(x);
+      });
+    }
+    return dedupeTitles(list);
+  } catch (e) {
+    return [];
+  }
+}
+
+async function getMalTitles(malId) {
+  const cleanId = String(malId || "").replace(/^mal[:_-]?/i, "").trim();
+  if (!/^\d+$/.test(cleanId)) return [];
+  try {
+    const res = await fetch("https://graphql.anilist.co", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "User-Agent": UA["User-Agent"],
+      },
+      body: JSON.stringify({
+        query:
+          "query ($idMal: Int) { Media(idMal: $idMal, type: ANIME) { title { romaji english native } synonyms } }",
+        variables: { idMal: Number(cleanId) },
+      }),
+    });
+    if (res.ok) {
+      const j = await res.json();
+      const media = j && j.data && j.data.Media;
+      if (media) {
+        const t = media.title || {};
+        const list = [t.english, t.romaji, t.native];
+        if (Array.isArray(media.synonyms)) {
+          media.synonyms.forEach(function (s) {
+            list.push(s);
+          });
+        }
+        const deduped = dedupeTitles(list);
+        if (deduped.length) return deduped;
+      }
+    }
+  } catch (e) {}
+
+  try {
+    const jRes = await fetch("https://api.jikan.moe/v4/anime/" + cleanId, {
+      headers: UA,
+    });
+    if (!jRes.ok) return [];
+    const jData = await jRes.json();
+    const d = jData && jData.data;
+    if (!d) return [];
+    const list = [d.title_english, d.title, d.title_japanese];
+    if (Array.isArray(d.title_synonyms)) {
+      d.title_synonyms.forEach(function (s) {
+        list.push(s);
+      });
+    }
+    return dedupeTitles(list);
   } catch (e) {
     return [];
   }
@@ -142,15 +166,18 @@ async function getTmdbTitles(id, mediaType) {
   const raw = String(id || "").trim();
   if (!raw) return [];
 
-  if (/^mal[:_-]?/i.test(raw)) {
-    return await getMalTitlesViaAniList(raw);
-  }
-  if (/^kitsu[:_-]?/i.test(raw)) {
+  if (/^kitsu[:_-]/i.test(raw)) {
     return await getKitsuTitles(raw);
+  }
+  if (/^mal[:_-]/i.test(raw)) {
+    return await getMalTitles(raw);
   }
 
   const cleanNumeric = raw.replace(/^(tmdb[:_-]?|tt)/i, "").trim();
-  if (!/^\d+$/.test(cleanNumeric)) return [raw];
+  if (!/^\d+$/.test(cleanNumeric)) {
+    const cleanedText = raw.replace(/^(anime|series|show)[:_-]/i, "").replace(/[-_]+/g, " ").trim();
+    return cleanedText ? [cleanedText] : [];
+  }
 
   const type = mediaType === "movie" ? "movie" : "tv";
   try {
@@ -163,29 +190,27 @@ async function getTmdbTitles(id, mediaType) {
         TMDB_KEY +
         "&append_to_response=alternative_titles"
     );
-    if (res.ok) {
-      const j = await res.json();
-      const titles = [
-        j.name || j.title,
-        j.original_name || j.original_title,
-      ].filter(Boolean);
+    if (!res.ok) return [];
+    const j = await res.json();
+    const titles = [
+      j.name || j.title,
+      j.original_name || j.original_title,
+    ].filter(Boolean);
 
-      const alt =
-        (j.alternative_titles &&
-          (j.alternative_titles.results || j.alternative_titles.titles)) ||
-        [];
-      alt.forEach(function (a) {
-        if (a && a.title && /^(US|GB|JP)$/.test(a.iso_3166_1 || "")) {
-          titles.push(a.title);
-        }
-      });
+    const alt =
+      (j.alternative_titles &&
+        (j.alternative_titles.results || j.alternative_titles.titles)) ||
+      [];
+    alt.forEach(function (a) {
+      if (a && a.title && /^(US|GB|JP)$/.test(a.iso_3166_1 || "")) {
+        titles.push(a.title);
+      }
+    });
 
-      const deduped = dedupeTitles(titles);
-      if (deduped.length) return deduped;
-    }
-  } catch (e) {}
-
-  return await getMalTitlesViaAniList(cleanNumeric);
+    return dedupeTitles(titles);
+  } catch (e) {
+    return [];
+  }
 }
 
 async function queryAlgoliaSeries(query) {
