@@ -74,6 +74,39 @@ function parseFirestoreDoc(doc) {
   return out;
 }
 
+async function getMalTitlesViaAniList(malId) {
+  const cleanId = String(malId || "").replace(/^mal[:_-]?/i, "").trim();
+  if (!/^\d+$/.test(cleanId)) return [];
+  try {
+    const res = await fetch("https://graphql.anilist.co", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "User-Agent": UA["User-Agent"],
+      },
+      body: JSON.stringify({
+        query:
+          "query ($idMal: Int) { Media(idMal: $idMal, type: ANIME) { title { romaji english native } synonyms } }",
+        variables: { idMal: Number(cleanId) },
+      }),
+    });
+    if (!res.ok) return [];
+    const j = await res.json();
+    const media = j && j.data && j.data.Media;
+    if (!media) return [];
+    const t = media.title || {};
+    return dedupeTitles([
+      t.english,
+      t.romaji,
+      t.native,
+      ...(Array.isArray(media.synonyms) ? media.synonyms : []),
+    ]);
+  } catch (e) {
+    return [];
+  }
+}
+
 async function getKitsuTitles(kitsuId) {
   const cleanId = String(kitsuId || "").replace(/^kitsu[:_-]?/i, "").trim();
   if (!/^\d+$/.test(cleanId)) return [];
@@ -91,18 +124,15 @@ async function getKitsuTitles(kitsuId) {
     const j = await res.json();
     const attrs = (j && j.data && j.data.attributes) || {};
     const titlesObj = attrs.titles || {};
-    const list = [
-      attrs.canonicalTitle,
+    return dedupeTitles([
       titlesObj.en,
+      attrs.canonicalTitle,
       titlesObj.en_jp,
       titlesObj.ja_jp,
-    ];
-    if (Array.isArray(attrs.abbreviatedTitles)) {
-      attrs.abbreviatedTitles.forEach(function (x) {
-        list.push(x);
-      });
-    }
-    return dedupeTitles(list);
+      ...(Array.isArray(attrs.abbreviatedTitles)
+        ? attrs.abbreviatedTitles
+        : []),
+    ]);
   } catch (e) {
     return [];
   }
@@ -112,11 +142,14 @@ async function getTmdbTitles(id, mediaType) {
   const raw = String(id || "").trim();
   if (!raw) return [];
 
-  if (/^kitsu[:_-]/i.test(raw)) {
+  if (/^mal[:_-]?/i.test(raw)) {
+    return await getMalTitlesViaAniList(raw);
+  }
+  if (/^kitsu[:_-]?/i.test(raw)) {
     return await getKitsuTitles(raw);
   }
 
-  const cleanNumeric = raw.replace(/^tmdb[:_-]/i, "").trim();
+  const cleanNumeric = raw.replace(/^(tmdb[:_-]?|tt)/i, "").trim();
   if (!/^\d+$/.test(cleanNumeric)) return [raw];
 
   const type = mediaType === "movie" ? "movie" : "tv";
@@ -152,7 +185,7 @@ async function getTmdbTitles(id, mediaType) {
     }
   } catch (e) {}
 
-  return await getKitsuTitles(cleanNumeric);
+  return await getMalTitlesViaAniList(cleanNumeric);
 }
 
 async function queryAlgoliaSeries(query) {
