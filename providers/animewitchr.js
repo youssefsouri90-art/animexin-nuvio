@@ -20,6 +20,18 @@ function normAscii(s) {
     .trim();
 }
 
+function dedupeTitles(list) {
+  const seen = {};
+  return (Array.isArray(list) ? list : [])
+    .filter(Boolean)
+    .filter(function (t) {
+      const k = normAscii(t) || String(t).trim().toLowerCase();
+      if (!k || seen[k]) return false;
+      seen[k] = true;
+      return true;
+    });
+}
+
 function firestoreDocUrl(docPath) {
   return (
     "https://firestore.googleapis.com/v1/projects/" +
@@ -62,28 +74,21 @@ function parseFirestoreDoc(doc) {
   return out;
 }
 
-async function getTmdbTitles(id, mediaType) {
-  const raw = String(id || "").trim();
-  if (!raw) return [];
-  if (!/^\d+$/.test(raw)) return [raw];
-
+async function getTmdbTitlesByNumericId(numId, mediaType) {
   const type = mediaType === "movie" ? "movie" : "tv";
   try {
     const res = await fetch(
       "https://api.themoviedb.org/3/" +
         type +
         "/" +
-        raw +
+        numId +
         "?api_key=" +
         TMDB_KEY +
         "&append_to_response=alternative_titles"
     );
     if (!res.ok) return [];
     const j = await res.json();
-    const titles = [
-      j.name || j.title,
-      j.original_name || j.original_title,
-    ].filter(Boolean);
+    const titles = [j.name || j.title, j.original_name || j.original_title];
 
     const alt =
       (j.alternative_titles &&
@@ -95,16 +100,93 @@ async function getTmdbTitles(id, mediaType) {
       }
     });
 
-    const seen = {};
-    return titles.filter(function (t) {
-      const k = normAscii(t) || String(t).trim().toLowerCase();
-      if (!k || seen[k]) return false;
-      seen[k] = true;
-      return true;
-    });
+    return dedupeTitles(titles);
   } catch (e) {
     return [];
   }
+}
+
+async function getJikanTitles(malId) {
+  const cleanId = String(malId || "").replace(/^mal:/i, "").trim();
+  if (!/^\d+$/.test(cleanId)) return [];
+  try {
+    const res = await fetch("https://api.jikan.moe/v4/anime/" + cleanId);
+    if (!res.ok) return [];
+    const j = await res.json();
+    const d = j && j.data;
+    if (!d) return [];
+
+    const titles = [
+      d.title,
+      d.title_english,
+      d.title_japanese,
+      ...(Array.isArray(d.title_synonyms) ? d.title_synonyms : []),
+    ];
+    return dedupeTitles(titles);
+  } catch (e) {
+    return [];
+  }
+}
+
+async function getKitsuTitles(kitsuId) {
+  const cleanId = String(kitsuId || "").replace(/^kitsu:/i, "").trim();
+  if (!/^\d+$/.test(cleanId)) return [];
+  try {
+    const res = await fetch(
+      "https://kitsu.io/api/edge/anime/" + encodeURIComponent(cleanId),
+      {
+        headers: {
+          Accept: "application/vnd.api+json",
+          "User-Agent": UA["User-Agent"],
+        },
+      }
+    );
+    if (!res.ok) return [];
+    const j = await res.json();
+    const attrs = (j && j.data && j.data.attributes) || {};
+    const titlesObj = attrs.titles || {};
+    const titles = [
+      attrs.canonicalTitle,
+      titlesObj.en,
+      titlesObj.en_jp,
+      titlesObj.ja_jp,
+      ...(Array.isArray(attrs.abbreviatedTitles)
+        ? attrs.abbreviatedTitles
+        : []),
+    ];
+    return dedupeTitles(titles);
+  } catch (e) {
+    return [];
+  }
+}
+
+async function getAnimeTitles(id, mediaType) {
+  const raw = String(id || "").trim();
+  if (!raw) return [];
+
+  if (/^mal:/i.test(raw)) {
+    return await getJikanTitles(raw);
+  }
+  if (/^kitsu:/i.test(raw)) {
+    return await getKitsuTitles(raw);
+  }
+  if (/^tmdb:/i.test(raw)) {
+    return await getTmdbTitlesByNumericId(
+      raw.replace(/^tmdb:/i, "").trim(),
+      mediaType
+    );
+  }
+  if (!/^\d+$/.test(raw)) {
+    return dedupeTitles([raw]);
+  }
+
+  const tmdbTitles = await getTmdbTitlesByNumericId(raw, mediaType);
+  if (tmdbTitles.length) return tmdbTitles;
+
+  const malTitles = await getJikanTitles(raw);
+  if (malTitles.length) return malTitles;
+
+  return await getKitsuTitles(raw);
 }
 
 async function queryAlgoliaSeries(query) {
@@ -176,13 +258,13 @@ function collectHitInfo(hit) {
   };
 }
 
-function scoreCandidate(tmdbTitles, cand, season) {
+function scoreCandidate(candidateTitles, cand, season) {
   const s = Number(season) || 1;
   const normNames = cand.names.map(normAscii).filter(Boolean);
   const joined = " " + normNames.join(" | ") + " ";
 
   let bestMatch = 0;
-  tmdbTitles.forEach(function (t) {
+  candidateTitles.forEach(function (t) {
     const nt = normAscii(t);
     if (!nt) return;
     const tTokens = nt.split(" ").filter(function (w) {
@@ -244,7 +326,7 @@ async function resolveMatchedAnimeId(id, mediaType, season) {
     return raw.replace(/^anime_list\//, "");
   }
 
-  const titles = await getTmdbTitles(raw, mediaType);
+  const titles = await getAnimeTitles(raw, mediaType);
   if (!titles.length) return null;
 
   const pool = {};
