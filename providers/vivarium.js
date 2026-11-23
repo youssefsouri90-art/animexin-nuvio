@@ -25,28 +25,30 @@ const PROVIDERS = [
   { key: "hello", label: "hello", def: true },
 ];
 
+// العربية فقط مفعّلة افتراضياً؛ باقي اللغات معطّلة لتسريع البحث
 const LANGUAGES = [
   { key: "lang_ar", code: "ar", label: "Arabic", def: true },
-  { key: "lang_bn", code: "bn", label: "Bengali", def: true },
-  { key: "lang_zh", code: "zh", label: "Chinese", def: true },
-  { key: "lang_nl", code: "nl", label: "Dutch", def: true },
-  { key: "lang_fr", code: "fr", label: "French", def: true },
-  { key: "lang_de", code: "de", label: "German", def: true },
-  { key: "lang_hi", code: "hi", label: "Hindi", def: true },
-  { key: "lang_it", code: "it", label: "Italian", def: true },
-  { key: "lang_ja", code: "ja", label: "Japanese", def: true },
-  { key: "lang_kn", code: "kn", label: "Kannada", def: true },
-  { key: "lang_ko", code: "ko", label: "Korean", def: true },
-  { key: "lang_pl", code: "pl", label: "Polish", def: true },
-  { key: "lang_pt", code: "pt", label: "Portuguese", def: true },
-  { key: "lang_ru", code: "ru", label: "Russian", def: true },
-  { key: "lang_es", code: "es", label: "Spanish", def: true },
-  { key: "lang_ta", code: "ta", label: "Tamil", def: true },
-  { key: "lang_te", code: "te", label: "Telugu", def: true },
-  { key: "lang_tr", code: "tr", label: "Turkish", def: true },
+  { key: "lang_bn", code: "bn", label: "Bengali", def: false },
+  { key: "lang_zh", code: "zh", label: "Chinese", def: false },
+  { key: "lang_nl", code: "nl", label: "Dutch", def: false },
+  { key: "lang_fr", code: "fr", label: "French", def: false },
+  { key: "lang_de", code: "de", label: "German", def: false },
+  { key: "lang_hi", code: "hi", label: "Hindi", def: false },
+  { key: "lang_it", code: "it", label: "Italian", def: false },
+  { key: "lang_ja", code: "ja", label: "Japanese", def: false },
+  { key: "lang_kn", code: "kn", label: "Kannada", def: false },
+  { key: "lang_ko", code: "ko", label: "Korean", def: false },
+  { key: "lang_pl", code: "pl", label: "Polish", def: false },
+  { key: "lang_pt", code: "pt", label: "Portuguese", def: false },
+  { key: "lang_ru", code: "ru", label: "Russian", def: false },
+  { key: "lang_es", code: "es", label: "Spanish", def: false },
+  { key: "lang_ta", code: "ta", label: "Tamil", def: false },
+  { key: "lang_te", code: "te", label: "Telugu", def: false },
+  { key: "lang_tr", code: "tr", label: "Turkish", def: false },
 ];
 
 const LANG_NAMES = {
+  ar: "Arabic",
   en: "English",
   hi: "Hindi",
   bn: "Bengali",
@@ -59,7 +61,6 @@ const LANG_NAMES = {
   ja: "Japanese",
   ko: "Korean",
   zh: "Chinese",
-  ar: "Arabic",
   pt: "Portuguese",
   ru: "Russian",
   it: "Italian",
@@ -107,7 +108,7 @@ const tmdbCache = new Map();
 
 function fetchWithTimeout(url, options, timeoutMs) {
   const opts = options || {};
-  const ms = typeof timeoutMs === "number" ? timeoutMs : 6000;
+  const ms = typeof timeoutMs === "number" ? timeoutMs : 5500;
   if (typeof AbortController === "undefined") {
     return fetch(url, opts).catch(function () {
       return null;
@@ -181,15 +182,17 @@ function findTmdbIdFromExternal(source, value, isTv) {
     return val ? String(val) : null;
   }
 
-  if (source === "imdb") {
+  if (source === "imdb" || source === "tvdb") {
+    const extSource = source === "imdb" ? "imdb_id" : "tvdb_id";
     const url =
       TMDB_API_BASE +
       "/find/" +
       encodeURIComponent(value) +
       "?api_key=" +
       encodeURIComponent(TMDB_KEY) +
-      "&external_source=imdb_id";
-    return fetchWithTimeout(url, {}, 5000)
+      "&external_source=" +
+      extSource;
+    return fetchWithTimeout(url, {}, 4000)
       .then(function (r) {
         return r && r.ok ? r.json() : null;
       })
@@ -205,35 +208,18 @@ function findTmdbIdFromExternal(source, value, isTv) {
       });
   }
 
-  if (source === "tvdb") {
-    const url =
-      TMDB_API_BASE +
-      "/find/" +
-      encodeURIComponent(value) +
-      "?api_key=" +
-      encodeURIComponent(TMDB_KEY) +
-      "&external_source=tvdb_id";
-    return fetchWithTimeout(url, {}, 5000)
-      .then(function (r) {
-        return r && r.ok ? r.json() : null;
-      })
-      .then(function (data) {
-        if (!data) return null;
-        const list = data.tv_results || data.movie_results || [];
-        return saveAndReturn(list[0] && list[0].id);
-      })
-      .catch(function () {
-        return null;
-      });
-  }
-
-  if (source === "mal" || source === "myanimelist" || source === "anilist" || source === "kitsu") {
+  if (
+    source === "mal" ||
+    source === "myanimelist" ||
+    source === "anilist" ||
+    source === "kitsu"
+  ) {
     let metaPromise;
     if (source === "mal" || source === "myanimelist") {
       metaPromise = fetchWithTimeout(
         "https://api.jikan.moe/v4/anime/" + encodeURIComponent(value),
         {},
-        5000
+        4000
       )
         .then(function (r) {
           return r && r.ok ? r.json() : null;
@@ -245,7 +231,10 @@ function findTmdbIdFromExternal(source, value, isTv) {
             title: d.title_english || d.title || "",
             year:
               d.year ||
-              (d.aired && d.aired.prop && d.aired.prop.from && d.aired.prop.from.year) ||
+              (d.aired &&
+                d.aired.prop &&
+                d.aired.prop.from &&
+                d.aired.prop.from.year) ||
               "",
           };
         });
@@ -262,7 +251,7 @@ function findTmdbIdFromExternal(source, value, isTv) {
           headers: { "Content-Type": "application/json" },
           body: gql,
         },
-        5000
+        4000
       )
         .then(function (r) {
           return r && r.ok ? r.json() : null;
@@ -279,7 +268,7 @@ function findTmdbIdFromExternal(source, value, isTv) {
       metaPromise = fetchWithTimeout(
         "https://kitsu.io/api/edge/anime/" + encodeURIComponent(value),
         { headers: { Accept: "application/vnd.api+json" } },
-        5000
+        4000
       )
         .then(function (r) {
           return r && r.ok ? r.json() : null;
@@ -313,7 +302,7 @@ function findTmdbIdFromExternal(source, value, isTv) {
           "&query=" +
           encodeURIComponent(info.title) +
           yearParam;
-        return fetchWithTimeout(searchUrl, {}, 5000)
+        return fetchWithTimeout(searchUrl, {}, 4000)
           .then(function (r) {
             return r && r.ok ? r.json() : null;
           })
@@ -329,7 +318,7 @@ function findTmdbIdFromExternal(source, value, isTv) {
               encodeURIComponent(TMDB_KEY) +
               "&query=" +
               encodeURIComponent(info.title);
-            return fetchWithTimeout(fallbackUrl, {}, 5000)
+            return fetchWithTimeout(fallbackUrl, {}, 4000)
               .then(function (r2) {
                 return r2 && r2.ok ? r2.json() : null;
               })
@@ -593,7 +582,7 @@ function createRunner() {
   function getUnsigned(path) {
     return Promise.resolve()
       .then(function () {
-        return fetchWithTimeout(BASE_URL + path, { headers: defaultHeaders() }, 5000);
+        return fetchWithTimeout(BASE_URL + path, { headers: defaultHeaders() }, 3500);
       })
       .then(function (response) {
         syncServerClock(response);
@@ -610,7 +599,7 @@ function createRunner() {
     headers["x-cv"] = "94092f52501e";
     if (nonce) headers["x-nonce"] = nonce;
     headers["x-sig"] = signRequest("GET", path, timestamp, nonce || "");
-    return fetchWithTimeout(BASE_URL + path, { headers: headers }, 8000);
+    return fetchWithTimeout(BASE_URL + path, { headers: headers }, 5500);
   }
 
   function fetchNonces() {
@@ -677,6 +666,37 @@ function langName(code) {
   return LANG_NAMES[code] || String(code || "").toUpperCase();
 }
 
+function normalizeSubtitleItem(sub) {
+  if (!sub || !sub.url) return null;
+  const code = String(sub.lang || sub.language || "und").toLowerCase();
+  return {
+    url: toAbsoluteUrl(String(sub.url)),
+    label: sub.label || langName(code),
+    language: code,
+  };
+}
+
+function mergeSubtitles(listA, listB) {
+  const combined = (listA || []).concat(listB || []);
+  const seen = Object.create(null);
+  const unique = [];
+  for (let i = 0; i < combined.length; i++) {
+    const item = normalizeSubtitleItem(combined[i]);
+    if (!item || seen[item.url]) continue;
+    seen[item.url] = true;
+    unique.push(item);
+  }
+  // تقديم الترجمة العربية أولاً، ثم الإنجليزية، ثم الباقي
+  return stableSort(unique, function (a, b) {
+    function priority(lang) {
+      if (lang === "ar" || lang.indexOf("ar-") === 0) return 0;
+      if (lang === "en" || lang.indexOf("en-") === 0) return 1;
+      return 2;
+    }
+    return priority(a.language) - priority(b.language);
+  });
+}
+
 function extractCandidates(events) {
   const candidates = [];
   for (let i = 0; i < events.length; i++) {
@@ -693,17 +713,14 @@ function extractCandidates(events) {
       if (!source || !source.url) continue;
 
       const inlineSubs = [];
-      if (Array.isArray(source.subs)) {
-        for (let k = 0; k < source.subs.length; k++) {
-          const sub = source.subs[k];
-          if (sub && sub.url && sub.lang) {
-            inlineSubs.push({
-              url: toAbsoluteUrl(sub.url),
-              label: sub.label || langName(sub.lang),
-              language: sub.lang,
-            });
-          }
-        }
+      const rawSubs = Array.isArray(source.subs)
+        ? source.subs
+        : Array.isArray(source.subtitles)
+        ? source.subtitles
+        : [];
+      for (let k = 0; k < rawSubs.length; k++) {
+        const normSub = normalizeSubtitleItem(rawSubs[k]);
+        if (normSub) inlineSubs.push(normSub);
       }
 
       candidates.push({
@@ -718,7 +735,7 @@ function extractCandidates(events) {
         hdr: !!source.hdr,
         optional: !!source.opt,
         pinned: !!source.pin,
-        lang: String(source.lang || "en"),
+        lang: String(source.lang || "en").toLowerCase(),
         dub: !!source.dub,
         inlineSubs: inlineSubs,
       });
@@ -774,17 +791,18 @@ function buildStream(candidate, label, subtitles, langLabel) {
   const sortTag = buildSortTag(resolutionTier(candidate), 6);
   const displayName =
     "Vivarium \u2022 " + (langLabel || label || candidate.provider);
+  const mergedSubs = mergeSubtitles(subtitles, candidate.inlineSubs);
   return {
     name: sortTag + displayName,
     title: sortTag + displayName,
     url: candidate.url,
     quality: resolutionLabel(candidate),
     headers: { Referer: BASE_URL + "/", "User-Agent": USER_AGENT },
-    subtitles: subtitles,
+    subtitles: mergedSubs,
   };
 }
 
-function pushGroup(streams, seenUrls, candidates, subtitles, langLabel) {
+function pushGroup(streams, seenUrls, candidates, sharedSubtitles, langLabel) {
   const fresh = [];
   for (let i = 0; i < candidates.length; i++) {
     if (seenUrls[candidates[i].url]) continue;
@@ -809,7 +827,7 @@ function pushGroup(streams, seenUrls, candidates, subtitles, langLabel) {
       buildStream(
         sorted[k],
         sorted[k] === best ? "Auto" : null,
-        subtitles,
+        sharedSubtitles,
         langLabel
       )
     );
@@ -823,7 +841,9 @@ function getStreams(id, mediaType, season, episode) {
 
   const allowedProviders = enabledProviders();
   const allowedLangs = enabledLanguages();
-  if (allowedProviders.length === 0 && allowedLangs.length === 0) {
+  const allowArabicDub = allowedLangs.indexOf("ar") !== -1;
+
+  if (allowedProviders.length === 0 && !allowArabicDub) {
     return Promise.resolve([]);
   }
 
@@ -840,19 +860,34 @@ function getStreams(id, mediaType, season, episode) {
         (q.isTv ? "&s=" + q.season + "&e=" + q.episode : "");
 
       return runner.fetchNonces().then(function (nonces) {
-        let nonceIndex = 0;
+        const nonce0 = (nonces && nonces[0]) || "";
+        const nonce1 = (nonces && nonces[1]) || "";
+
         return runner
-          .fetchEventStream(baseQuery, nonces[nonceIndex++] || "")
+          .fetchEventStream(baseQuery, nonce0)
           .then(function (baseEventText) {
             const allBaseCandidates = extractCandidates(
               parseServerSentEvents(baseEventText)
             );
             if (!allBaseCandidates.length) return [];
 
+            // جمع كل الترجمات المتاحة من المرشّحات الأساسية
+            let collectedSubs = [];
+            for (let s = 0; s < allBaseCandidates.length; s++) {
+              if (
+                allBaseCandidates[s].inlineSubs &&
+                allBaseCandidates[s].inlineSubs.length
+              ) {
+                collectedSubs = mergeSubtitles(
+                  collectedSubs,
+                  allBaseCandidates[s].inlineSubs
+                );
+              }
+            }
+
             const streams = [];
             const seenUrls = Object.create(null);
 
-            let englishSubs = [];
             if (allowedProviders.length > 0) {
               let engCandidates = allBaseCandidates.filter(function (c) {
                 return (
@@ -864,70 +899,45 @@ function getStreams(id, mediaType, season, episode) {
                 engCandidates = stableSort(engCandidates, function (a, b) {
                   return scoreCandidate(b) - scoreCandidate(a);
                 });
-                englishSubs = engCandidates[0].inlineSubs;
-                pushGroup(streams, seenUrls, engCandidates, englishSubs, null);
+                pushGroup(streams, seenUrls, engCandidates, collectedSubs, null);
               }
             }
 
-            if (allowedLangs.length === 0) return streams;
+            if (!allowArabicDub) return streams;
 
-            const coveredDubLangs = [];
-            const dubGroups = Object.create(null);
-            const baseDubLangs = [];
-            for (let i = 0; i < allBaseCandidates.length; i++) {
-              const c = allBaseCandidates[i];
-              if (!c.dub || allowedLangs.indexOf(c.lang) === -1) continue;
-              if (!dubGroups[c.lang]) {
-                dubGroups[c.lang] = [];
-                baseDubLangs.push(c.lang);
-              }
-              dubGroups[c.lang].push(c);
-            }
-            for (let j = 0; j < baseDubLangs.length; j++) {
-              const lang = baseDubLangs[j];
-              if (
-                pushGroup(
-                  streams,
-                  seenUrls,
-                  dubGroups[lang],
-                  englishSubs,
-                  langName(lang)
-                )
-              ) {
-                coveredDubLangs.push(lang);
-              }
-            }
-
-            const missingDubLangs = allowedLangs.filter(function (code) {
-              return coveredDubLangs.indexOf(code) === -1;
+            // فحص الدبلجة العربية الموجودة في الرد الأساسي أولاً
+            const arabicBaseCandidates = allBaseCandidates.filter(function (c) {
+              return c.dub && c.lang === "ar";
             });
-            if (missingDubLangs.length === 0) return streams;
+            if (arabicBaseCandidates.length > 0) {
+              pushGroup(
+                streams,
+                seenUrls,
+                arabicBaseCandidates,
+                collectedSubs,
+                "Arabic"
+              );
+              return streams;
+            }
 
-            return Promise.all(
-              missingDubLangs.map(function (code) {
-                return runner.fetchEventStream(
-                  baseQuery + "&dubs=1&al=" + encodeURIComponent(code),
-                  nonces[nonceIndex++] || ""
-                );
-              })
-            ).then(function (dubEventTexts) {
-              for (let d = 0; d < missingDubLangs.length; d++) {
-                const dubLang = missingDubLangs[d];
-                const dubCandidates = extractCandidates(
-                  parseServerSentEvents(dubEventTexts[d])
-                ).filter(function (candidate) {
-                  return candidate.dub && candidate.lang === dubLang;
+            // طلب الدبلجة العربية فقط إذا لم تكن موجودة في الرد الأساسي
+            return runner
+              .fetchEventStream(baseQuery + "&dubs=1&al=ar", nonce1)
+              .then(function (arDubText) {
+                const arCandidates = extractCandidates(
+                  parseServerSentEvents(arDubText)
+                ).filter(function (c) {
+                  return c.dub && c.lang === "ar";
                 });
                 pushGroup(
                   streams,
                   seenUrls,
-                  dubCandidates,
-                  englishSubs,
-                  langName(dubLang)
+                  arCandidates,
+                  collectedSubs,
+                  "Arabic"
                 );
-              }
-              return streams;
-            });
+                return streams;
+              });
           });
       });
     })
