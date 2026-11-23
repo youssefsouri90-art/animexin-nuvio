@@ -1,4 +1,9 @@
 // Redflix provider for Nuvio.
+// redflix.ac plays everything through vidbolt.st, which takes a TMDB id
+// directly:  GET https://vidbolt.st/api/resolve?type=movie&id=<tmdbId>
+// -> { stream: { sources: [ { url, kind:"hls", quality, master } ] } }
+// No title search and no TMDB key needed.
+
 const SITE = "https://vidbolt.st";
 const API = SITE + "/api/resolve";
 const UA = {
@@ -7,6 +12,7 @@ const UA = {
 };
 const PLAY_HEADERS = Object.assign({}, UA, { Referer: SITE + "/", Origin: SITE });
 
+// ---------- helpers ----------
 function qualityLabel(h) {
   if (h >= 2000) return "2160p (4K)";
   if (h >= 1400) return "1440p";
@@ -41,6 +47,7 @@ async function callResolve(type, id, season, episode) {
   if (type === "movie") {
     urls.push(`${API}?type=movie&id=${id}`);
   } else {
+    // TV parameter names are not confirmed: try the common spellings
     urls.push(`${API}?type=tv&id=${id}&season=${season}&episode=${episode}`);
     urls.push(`${API}?type=tv&id=${id}&s=${season}&e=${episode}`);
   }
@@ -55,6 +62,7 @@ async function callResolve(type, id, season, episode) {
   return { stream: null, tried: last };
 }
 
+// Parse the HLS master to detect available audio tracks and max resolution.
 function parseMaster(text, baseUrl, key) {
   const lines = text.split(/\r?\n/);
   const media = [], audioTracks = [], variants = [];
@@ -64,16 +72,8 @@ function parseMaster(text, baseUrl, key) {
       const updated = line.replace(/URI="([^"]+)"/, (m, u) => 'URI="' + withKey(absUrl(baseUrl, u), key) + '"');
       media.push(updated);
       if (/TYPE=AUDIO/.test(updated)) {
-        const uriMatch = /URI="([^"]+)"/.exec(updated);
         const nameMatch = /NAME="([^"]+)"/.exec(updated);
-        const langMatch = /LANGUAGE="([^"]+)"/.exec(updated);
-        if (uriMatch && uriMatch[1]) {
-          audioTracks.push({
-            url: uriMatch[1],
-            name: (nameMatch && nameMatch[1]) || "Audio",
-            lang: (langMatch && langMatch[1]) || "",
-          });
-        }
+        audioTracks.push((nameMatch && nameMatch[1]) || "Audio");
       }
     } else if (line.indexOf("#EXT-X-STREAM-INF") === 0) {
       let next = "";
@@ -91,6 +91,9 @@ function parseMaster(text, baseUrl, key) {
   return { media, audioTracks, variants };
 }
 
+// ---------- id mapping ----------
+// Nuvio passes anime as "kitsu:<id>[:<episode>]" and some titles as "tt<imdb>".
+// vidbolt only understands TMDB ids, so convert first.
 const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
 
 async function tmdbGet(path) {
@@ -166,6 +169,7 @@ async function mapToTmdb(rawId, mediaType, season, episode, dbg) {
   return null;
 }
 
+// ---------- entry point ----------
 async function getStreams(tmdbId, mediaType, season, episode) {
   const dbg = [];
   const fail = (m) => [{ name: "DEBUG " + dbg.concat(m).join(" > ").slice(0, 500), title: dbg.concat(m).join(" > "), url: "https://debug.invalid/", quality: "debug" }];
@@ -189,37 +193,17 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       const parsed = masterText ? parseMaster(masterText, src.url, key) : { media: [], audioTracks: [], variants: [] };
       const max = parsed.variants.length ? parsed.variants[0].height : 0;
 
-      streams.push({
-        name: "Redflix",
-        title: server + " (master)",
-        url: src.url,
-        quality: max ? "Auto (up to " + qualityLabel(max) + ")" : (src.quality || "Auto"),
-        headers: PLAY_HEADERS,
-        provider: "redflix",
-      });
-
-      parsed.variants.forEach((v) =>
+      // Keep only the master stream which includes audio and subtitle tracks
+      if (parsed.audioTracks.length || parsed.variants.length) {
         streams.push({
           name: "Redflix",
-          title: server + " (" + qualityLabel(v.height) + " direct)",
-          url: v.url,
-          quality: qualityLabel(v.height),
+          title: server + (parsed.audioTracks.length ? " (Audio)" : " (Master)"),
+          url: src.url,
+          quality: max ? "Auto (up to " + qualityLabel(max) + ")" : (src.quality || "Auto"),
           headers: PLAY_HEADERS,
           provider: "redflix",
-        })
-      );
-
-      // Expose direct audio playlists so you can verify audio playback in Nuvio
-      parsed.audioTracks.forEach((a) =>
-        streams.push({
-          name: "Redflix Audio",
-          title: server + " (" + a.name + ")",
-          url: a.url,
-          quality: "Audio",
-          headers: PLAY_HEADERS,
-          provider: "redflix",
-        })
-      );
+        });
+      }
     }
     return streams.length ? streams : fail("empty sources");
   } catch (e) {
