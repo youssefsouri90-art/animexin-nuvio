@@ -20,6 +20,18 @@ function normAscii(s) {
     .trim();
 }
 
+function dedupeTitles(list) {
+  const seen = {};
+  return (Array.isArray(list) ? list : [])
+    .filter(Boolean)
+    .filter(function (t) {
+      const k = normAscii(t) || String(t).trim().toLowerCase();
+      if (!k || seen[k]) return false;
+      seen[k] = true;
+      return true;
+    });
+}
+
 function firestoreDocUrl(docPath) {
   return (
     "https://firestore.googleapis.com/v1/projects/" +
@@ -62,10 +74,50 @@ function parseFirestoreDoc(doc) {
   return out;
 }
 
+async function getKitsuTitles(kitsuId) {
+  const cleanId = String(kitsuId || "").replace(/^kitsu[:_-]?/i, "").trim();
+  if (!/^\d+$/.test(cleanId)) return [];
+  try {
+    const res = await fetch(
+      "https://kitsu.io/api/edge/anime/" + encodeURIComponent(cleanId),
+      {
+        headers: {
+          Accept: "application/vnd.api+json",
+          "User-Agent": UA["User-Agent"],
+        },
+      }
+    );
+    if (!res.ok) return [];
+    const j = await res.json();
+    const attrs = (j && j.data && j.data.attributes) || {};
+    const titlesObj = attrs.titles || {};
+    const list = [
+      attrs.canonicalTitle,
+      titlesObj.en,
+      titlesObj.en_jp,
+      titlesObj.ja_jp,
+    ];
+    if (Array.isArray(attrs.abbreviatedTitles)) {
+      attrs.abbreviatedTitles.forEach(function (x) {
+        list.push(x);
+      });
+    }
+    return dedupeTitles(list);
+  } catch (e) {
+    return [];
+  }
+}
+
 async function getTmdbTitles(id, mediaType) {
   const raw = String(id || "").trim();
   if (!raw) return [];
-  if (!/^\d+$/.test(raw)) return [raw];
+
+  if (/^kitsu[:_-]/i.test(raw)) {
+    return await getKitsuTitles(raw);
+  }
+
+  const cleanNumeric = raw.replace(/^tmdb[:_-]/i, "").trim();
+  if (!/^\d+$/.test(cleanNumeric)) return [raw];
 
   const type = mediaType === "movie" ? "movie" : "tv";
   try {
@@ -73,38 +125,34 @@ async function getTmdbTitles(id, mediaType) {
       "https://api.themoviedb.org/3/" +
         type +
         "/" +
-        raw +
+        cleanNumeric +
         "?api_key=" +
         TMDB_KEY +
         "&append_to_response=alternative_titles"
     );
-    if (!res.ok) return [];
-    const j = await res.json();
-    const titles = [
-      j.name || j.title,
-      j.original_name || j.original_title,
-    ].filter(Boolean);
+    if (res.ok) {
+      const j = await res.json();
+      const titles = [
+        j.name || j.title,
+        j.original_name || j.original_title,
+      ].filter(Boolean);
 
-    const alt =
-      (j.alternative_titles &&
-        (j.alternative_titles.results || j.alternative_titles.titles)) ||
-      [];
-    alt.forEach(function (a) {
-      if (a && a.title && /^(US|GB|JP)$/.test(a.iso_3166_1 || "")) {
-        titles.push(a.title);
-      }
-    });
+      const alt =
+        (j.alternative_titles &&
+          (j.alternative_titles.results || j.alternative_titles.titles)) ||
+        [];
+      alt.forEach(function (a) {
+        if (a && a.title && /^(US|GB|JP)$/.test(a.iso_3166_1 || "")) {
+          titles.push(a.title);
+        }
+      });
 
-    const seen = {};
-    return titles.filter(function (t) {
-      const k = normAscii(t) || String(t).trim().toLowerCase();
-      if (!k || seen[k]) return false;
-      seen[k] = true;
-      return true;
-    });
-  } catch (e) {
-    return [];
-  }
+      const deduped = dedupeTitles(titles);
+      if (deduped.length) return deduped;
+    }
+  } catch (e) {}
+
+  return await getKitsuTitles(cleanNumeric);
 }
 
 async function queryAlgoliaSeries(query) {
@@ -182,25 +230,26 @@ function scoreCandidate(tmdbTitles, cand, season) {
   const joined = " " + normNames.join(" | ") + " ";
 
   let bestMatch = 0;
-  tmdbTitles.forEach(function (t) {
+  tmdbTitles.forEach(function (t, idx) {
     const nt = normAscii(t);
     if (!nt) return;
+    const weightBoost = idx === 0 ? 1.05 : 1.0;
     const tTokens = nt.split(" ").filter(function (w) {
       return w.length > 2;
     });
 
     normNames.forEach(function (nn) {
       if (nn === nt) {
-        bestMatch = Math.max(bestMatch, 1.0);
+        bestMatch = Math.max(bestMatch, 1.0 * weightBoost);
       } else if (nn.indexOf(nt) !== -1 || nt.indexOf(nn) !== -1) {
-        bestMatch = Math.max(bestMatch, 0.85);
+        bestMatch = Math.max(bestMatch, 0.85 * weightBoost);
       } else if (tTokens.length) {
         let matched = 0;
         tTokens.forEach(function (tok) {
           if ((" " + nn + " ").indexOf(" " + tok + " ") !== -1) matched++;
         });
         const ratio = matched / tTokens.length;
-        bestMatch = Math.max(bestMatch, ratio * 0.8);
+        bestMatch = Math.max(bestMatch, ratio * 0.8 * weightBoost);
       }
     });
   });
@@ -275,6 +324,19 @@ async function resolveMatchedAnimeId(id, mediaType, season) {
   return best.id;
 }
 
+function extractEpisodeNumberFromObj(ep) {
+  if (!ep || typeof ep !== "object") return null;
+  const directKeys = ["episode", "ep", "number", "episode_number", "ep_num"];
+  for (let i = 0; i < directKeys.length; i++) {
+    const v = ep[directKeys[i]];
+    if (v !== undefined && v !== null && String(v).trim() !== "") {
+      const n = Number(String(v).replace(/[^\d]/g, ""));
+      if (!isNaN(n) && n > 0) return n;
+    }
+  }
+  return null;
+}
+
 function pickEpisodeDocId(episodes, episodeNum) {
   if (!Array.isArray(episodes) || !episodes.length) return null;
   const target = Number(episodeNum) || 1;
@@ -291,8 +353,18 @@ function pickEpisodeDocId(episodes, episodeNum) {
   });
   if (exactDoc) return String(exactDoc.doc_id);
 
+  const byField = episodes.find(function (ep) {
+    if (!ep || !ep.doc_id) return false;
+    return extractEpisodeNumberFromObj(ep) === target;
+  });
+  if (byField) return String(byField.doc_id);
+
   const byName = episodes.find(function (ep) {
     if (!ep || !ep.doc_id) return false;
+    const epMatch = String(ep.name || "").match(
+      /(?:ep(?:isode)?|حلقة)\s*0*(\d+)/i
+    );
+    if (epMatch) return Number(epMatch[1]) === target;
     const m = String(ep.name || "").match(/(\d+)/);
     return m && Number(m[1]) === target;
   });
@@ -346,7 +418,8 @@ async function verifyPlayableStream(url) {
 async function getStreams(id, mediaType, season, episode) {
   try {
     const isMovie = mediaType === "movie";
-    const epNum = isMovie ? 1 : Number(episode || season || 1) || 1;
+    const parsedEp = Number(episode);
+    const epNum = isMovie ? 1 : parsedEp > 0 ? parsedEp : 1;
 
     const animeId = await resolveMatchedAnimeId(id, mediaType, season);
     if (!animeId) return [];
