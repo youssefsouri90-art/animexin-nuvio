@@ -9,13 +9,11 @@ const UA = {
     "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36",
 };
 
-function playHeadersFor(url) {
-  try {
-    const o = new URL(url).origin;
-    return Object.assign({}, UA, { Referer: o + "/", Origin: o });
-  } catch (e) {
-    return Object.assign({}, UA, { Referer: VIDBOLT_SITE + "/", Origin: VIDBOLT_SITE });
-  }
+function playHeaders(siteOrigin) {
+  return Object.assign({}, UA, {
+    Referer: siteOrigin + "/",
+    Origin: siteOrigin,
+  });
 }
 
 function qualityLabel(h) {
@@ -74,7 +72,7 @@ function parseMaster(text, baseUrl, key) {
   return { media, audioTracks, variants };
 }
 
-function buildMasterStream(label, masterUrl, masterText, fallbackQuality) {
+function buildMasterStream(label, masterUrl, masterText, fallbackQuality, siteOrigin) {
   const key = (/[?&]api_key=([^&]+)/.exec(masterUrl) || [])[1] || "";
   const parsed = masterText ? parseMaster(masterText, masterUrl, key) : { media: [], audioTracks: [], variants: [] };
   const max = parsed.variants.length ? parsed.variants[0].height : 0;
@@ -84,7 +82,7 @@ function buildMasterStream(label, masterUrl, masterText, fallbackQuality) {
     title: label + " (Audio" + audioInfo + ")",
     url: masterUrl,
     quality: max ? "Auto (up to " + qualityLabel(max) + ")" : (fallbackQuality || "Auto"),
-    headers: playHeadersFor(masterUrl),
+    headers: playHeaders(siteOrigin),
     provider: "redflix",
   };
 }
@@ -111,15 +109,16 @@ async function fetchVidbolt(type, id, season, episode) {
 
   const out = [];
   const server = streamObj.server || "vidbolt";
+  const headers = playHeaders(VIDBOLT_SITE);
   for (const src of streamObj.sources) {
     if (!src || !src.url) continue;
     let masterText = src.master;
     if (!masterText) {
       try {
-        masterText = await (await fetch(src.url, { headers: playHeadersFor(src.url) })).text();
+        masterText = await (await fetch(src.url, { headers })).text();
       } catch (e) {}
     }
-    out.push(buildMasterStream(server, src.url, masterText, src.quality || "Auto"));
+    out.push(buildMasterStream(server, src.url, masterText, src.quality || "Auto", VIDBOLT_SITE));
   }
   return out;
 }
@@ -138,15 +137,22 @@ async function fetchVidly(type, id, season, episode) {
     });
     if (!r.ok) return [];
     const html = await r.text();
-    const matches = [...html.matchAll(/https?:\/\/[^"'\''\s<>]+\.m3u8[^"'\''\s<>]*/gi)].map((m) => m[0]);
+    const matches = [...html.matchAll(/https?:\/\/[^"'\s<>\\]+\.m3u8[^"'\s<>\\]*/gi)].map((m) =>
+      m[0].replace(/\\+$/, "")
+    );
     const unique = [...new Set(matches)];
     const out = [];
+    const headers = playHeaders(VIDLY_SITE);
     for (const mUrl of unique) {
       let masterText = "";
       try {
-        masterText = await (await fetch(mUrl, { headers: playHeadersFor(mUrl) })).text();
-      } catch (e) {}
-      out.push(buildMasterStream("vidly", mUrl, masterText, "Auto"));
+        const mr = await fetch(mUrl, { headers });
+        if (!mr.ok) continue;
+        masterText = await mr.text();
+      } catch (e) {
+        continue;
+      }
+      out.push(buildMasterStream("vidly", mUrl, masterText, "Auto", VIDLY_SITE));
     }
     return out;
   } catch (e) {
