@@ -303,6 +303,9 @@
       if (!q) continue;
       var url = BASE_URL + "/mobile/search.php?s=" + encodeURIComponent(q) + "&t=" + Date.now();
       var json = await fetchJson(url, nfHeaders(), 4500);
+      if (json && String(json.head || "").toLowerCase().indexOf("top searches") !== -1) {
+        continue;
+      }
       var list = (json && Array.isArray(json.searchResult)) ? json.searchResult : [];
       if (!list.length) continue;
 
