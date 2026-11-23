@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
-  "version": "2.2.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, anime3rb.com, animewitcher.com), Arabic dubbed cartoons & movies (cartoony.net, carateen.tv), and movies & TV (cinema.army, mapple, redflix, vivarium.st)",
+  "version": "2.3.0",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, anime3rb.com, animewitcher.com), Netflix streams (net52.cc), and movies & TV (cinema.army, mapple, redflix)",
   "scrapers": [
     {
       "id": "animexin",
@@ -92,24 +92,13 @@
       "formats": ["mp4"]
     },
     {
-      "id": "vivarium",
-      "name": "Vivarium",
-      "description": "Movie and TV streams from vivarium.st with multi-provider and multi-language dub support",
+      "id": "netflix",
+      "name": "Netflix",
+      "description": "Netflix movies and TV streams via NetMirror (net52.cc) with subtitle tracks",
       "version": "1.0.0",
       "author": "you",
       "supportedTypes": ["movie", "tv"],
-      "filename": "providers/vivarium.js",
-      "enabled": true,
-      "formats": ["hls", "mp4"]
-    },
-    {
-      "id": "cartoony",
-      "name": "Cartoony",
-      "description": "Arabic dubbed cartoons, anime, and movies from cartoony.net and carateen.tv",
-      "version": "1.0.0",
-      "author": "you",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "providers/cartoony.js",
+      "filename": "providers/netflix.js",
       "enabled": true,
       "formats": ["hls", "mp4"]
     }
