@@ -204,6 +204,12 @@
     return out;
   }
 
+  function extractNumericId(rawId) {
+    var str = String(rawId || "").trim();
+    var m = str.match(/(\d+)/);
+    return m ? m[1] : "";
+  }
+
   function normalizeText(str) {
     return String(str || "")
       .toLowerCase()
@@ -218,22 +224,16 @@
 
   function pushUniqueTitle(list, val) {
     var clean = String(val || "").trim();
-    if (clean && list.indexOf(clean) === -1) list.push(clean);
+    if (!clean) return;
+    if (list.indexOf(clean) === -1) list.push(clean);
+    var stripped = clean.replace(/\s*[\(\[][^\)\]]*[\)\]]\s*/g, " ").replace(/\s+/g, " ").trim();
+    if (stripped && stripped !== clean && list.indexOf(stripped) === -1) {
+      list.push(stripped);
+    }
   }
 
-  async function resolveTmdbMeta(tmdbId, mediaType) {
-    var kind = mediaType === "movie" ? "movie" : "tv";
-    var cacheKey = kind + ":" + String(tmdbId || "");
-    if (tmdbCache[cacheKey]) return tmdbCache[cacheKey];
-
-    if (!tmdbId || isNaN(Number(tmdbId))) {
-      var fallback = { titles: [String(tmdbId || "")], year: null };
-      tmdbCache[cacheKey] = fallback;
-      return fallback;
-    }
-
-    var endpoint = kind === "movie" ? "movie" : "tv";
-    var base = "https://api.themoviedb.org/3/" + endpoint + "/" + tmdbId;
+  async function fetchTmdbByEndpoint(numericId, endpoint) {
+    var base = "https://api.themoviedb.org/3/" + endpoint + "/" + numericId;
     var results = await Promise.all([
       fetchJson(base + "?api_key=" + TMDB_API_KEY + "&language=en-US", {}, 3500),
       fetchJson(base + "?api_key=" + TMDB_API_KEY + "&language=ar-SA", {}, 3500),
@@ -261,9 +261,33 @@
     var dateStr = enData.release_date || enData.first_air_date || arData.release_date || arData.first_air_date || "";
     var year = dateStr ? Number(dateStr.slice(0, 4)) : null;
 
-    var out = { titles: titles, year: year };
-    tmdbCache[cacheKey] = out;
-    return out;
+    return { titles: titles, year: year };
+  }
+
+  async function resolveTmdbMeta(rawId, mediaType) {
+    var primaryKind = mediaType === "movie" ? "movie" : "tv";
+    var numericId = extractNumericId(rawId);
+    var cacheKey = primaryKind + ":" + String(numericId || rawId || "");
+    if (tmdbCache[cacheKey]) return tmdbCache[cacheKey];
+
+    if (!numericId) {
+      var fallback = { titles: [String(rawId || "").trim()].filter(Boolean), year: null };
+      tmdbCache[cacheKey] = fallback;
+      return fallback;
+    }
+
+    var primary = await fetchTmdbByEndpoint(numericId, primaryKind);
+    if (!primary.titles.length) {
+      var secondaryKind = primaryKind === "movie" ? "tv" : "movie";
+      var secondary = await fetchTmdbByEndpoint(numericId, secondaryKind);
+      if (secondary.titles.length) {
+        tmdbCache[cacheKey] = secondary;
+        return secondary;
+      }
+    }
+
+    tmdbCache[cacheKey] = primary;
+    return primary;
   }
 
   function scoreSearchItem(item, queryTitles, year) {
@@ -284,7 +308,7 @@
         for (var k = 0; k < tokens.length; k++) {
           if (normTitle.indexOf(tokens[k]) !== -1) hits++;
         }
-        if (hits > 0) score = Math.max(score, hits * 20);
+        if (hits > 0) score = Math.max(score, hits * 25);
       }
     }
 
@@ -318,7 +342,7 @@
           best = list[j];
         }
       }
-      if (best && best.id && bestScore >= 40) {
+      if (best && best.id && bestScore >= 20) {
         return best;
       }
     }
@@ -393,8 +417,8 @@
     try {
       var kind = mediaType === "movie" ? "movie" : "tv";
       var meta = await resolveTmdbMeta(tmdbId, kind);
-      var queryTitles = meta.titles.length ? meta.titles : [String(tmdbId || "")];
-      if (!queryTitles.length || !queryTitles[0]) return [];
+      var queryTitles = meta.titles.length ? meta.titles : [String(tmdbId || "").trim()].filter(Boolean);
+      if (!queryTitles.length) return [];
 
       var found = await searchNetflix(queryTitles, meta.year);
       if (!found || !found.id) return [];
