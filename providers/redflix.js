@@ -1,18 +1,23 @@
-// Redflix provider for Nuvio.
-// redflix.ac plays everything through vidbolt.st, which takes a TMDB id
-// directly:  GET https://vidbolt.st/api/resolve?type=movie&id=<tmdbId>
-// -> { stream: { sources: [ { url, kind:"hls", quality, master } ] } }
-// No title search and no TMDB key needed.
+// Redflix provider for Nuvio (Vidbolt + Vidly).
+const SITE = "https://redflix.ac";
+const VIDBOLT_SITE = "https://vidbolt.st";
+const VIDBOLT_API = VIDBOLT_SITE + "/api/resolve";
+const VIDLY_SITE = "https://vidly.pro";
 
-const SITE = "https://vidbolt.st";
-const API = SITE + "/api/resolve";
 const UA = {
   "User-Agent":
     "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36",
 };
-const PLAY_HEADERS = Object.assign({}, UA, { Referer: SITE + "/", Origin: SITE });
 
-// ---------- helpers ----------
+function playHeadersFor(url) {
+  try {
+    const o = new URL(url).origin;
+    return Object.assign({}, UA, { Referer: o + "/", Origin: o });
+  } catch (e) {
+    return Object.assign({}, UA, { Referer: VIDBOLT_SITE + "/", Origin: VIDBOLT_SITE });
+  }
+}
+
 function qualityLabel(h) {
   if (h >= 2000) return "2160p (4K)";
   if (h >= 1400) return "1440p";
@@ -41,28 +46,6 @@ async function getJson(url, headers) {
   catch (e) { return { ok: false, raw: t }; }
 }
 
-async function callResolve(type, id, season, episode) {
-  const ref = { Referer: `${SITE}/${type}/${id}?theme=E50914&autoPlay=true`, Accept: "*/*" };
-  const urls = [];
-  if (type === "movie") {
-    urls.push(`${API}?type=movie&id=${id}`);
-  } else {
-    // TV parameter names are not confirmed: try the common spellings
-    urls.push(`${API}?type=tv&id=${id}&season=${season}&episode=${episode}`);
-    urls.push(`${API}?type=tv&id=${id}&s=${season}&e=${episode}`);
-  }
-  let last = "";
-  for (const u of urls) {
-    const r = await getJson(u, ref);
-    last = u.replace(API, "") + " -> " + (r.raw || "").slice(0, 160);
-    if (r.ok && r.json && r.json.stream && r.json.stream.sources && r.json.stream.sources.length) {
-      return { stream: r.json.stream, tried: last };
-    }
-  }
-  return { stream: null, tried: last };
-}
-
-// Parse the HLS master to detect available audio tracks and max resolution.
 function parseMaster(text, baseUrl, key) {
   const lines = text.split(/\r?\n/);
   const media = [], audioTracks = [], variants = [];
@@ -91,9 +74,87 @@ function parseMaster(text, baseUrl, key) {
   return { media, audioTracks, variants };
 }
 
-// ---------- id mapping ----------
-// Nuvio passes anime as "kitsu:<id>[:<episode>]" and some titles as "tt<imdb>".
-// vidbolt only understands TMDB ids, so convert first.
+function buildMasterStream(label, masterUrl, masterText, fallbackQuality) {
+  const key = (/[?&]api_key=([^&]+)/.exec(masterUrl) || [])[1] || "";
+  const parsed = masterText ? parseMaster(masterText, masterUrl, key) : { media: [], audioTracks: [], variants: [] };
+  const max = parsed.variants.length ? parsed.variants[0].height : 0;
+  const audioInfo = parsed.audioTracks.length ? " | " + parsed.audioTracks.join(", ") : "";
+  return {
+    name: "Redflix",
+    title: label + " (Audio" + audioInfo + ")",
+    url: masterUrl,
+    quality: max ? "Auto (up to " + qualityLabel(max) + ")" : (fallbackQuality || "Auto"),
+    headers: playHeadersFor(masterUrl),
+    provider: "redflix",
+  };
+}
+
+// ---------- Vidbolt ----------
+async function fetchVidbolt(type, id, season, episode) {
+  const ref = { Referer: `${VIDBOLT_SITE}/${type}/${id}?theme=E50914&autoPlay=true`, Accept: "*/*" };
+  const urls = type === "movie"
+    ? [`${VIDBOLT_API}?type=movie&id=${id}`]
+    : [
+        `${VIDBOLT_API}?type=tv&id=${id}&season=${season}&episode=${episode}`,
+        `${VIDBOLT_API}?type=tv&id=${id}&s=${season}&e=${episode}`,
+      ];
+
+  let streamObj = null;
+  for (const u of urls) {
+    const r = await getJson(u, ref);
+    if (r.ok && r.json && r.json.stream && r.json.stream.sources && r.json.stream.sources.length) {
+      streamObj = r.json.stream;
+      break;
+    }
+  }
+  if (!streamObj) return [];
+
+  const out = [];
+  const server = streamObj.server || "vidbolt";
+  for (const src of streamObj.sources) {
+    if (!src || !src.url) continue;
+    let masterText = src.master;
+    if (!masterText) {
+      try {
+        masterText = await (await fetch(src.url, { headers: playHeadersFor(src.url) })).text();
+      } catch (e) {}
+    }
+    out.push(buildMasterStream(server, src.url, masterText, src.quality || "Auto"));
+  }
+  return out;
+}
+
+// ---------- Vidly ----------
+async function fetchVidly(type, id, season, episode) {
+  const pageUrl = type === "movie"
+    ? `${VIDLY_SITE}/movie/${id}`
+    : `${VIDLY_SITE}/tv/${id}/${season}/${episode}`;
+  try {
+    const r = await fetch(pageUrl, {
+      headers: Object.assign({}, UA, {
+        Referer: SITE + "/",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      }),
+    });
+    if (!r.ok) return [];
+    const html = await r.text();
+    const matches = [...html.matchAll(/https?:\/\/[^"'\''\s<>]+\.m3u8[^"'\''\s<>]*/gi)].map((m) => m[0]);
+    const unique = [...new Set(matches)];
+    const out = [];
+    for (const mUrl of unique) {
+      let masterText = "";
+      try {
+        masterText = await (await fetch(mUrl, { headers: playHeadersFor(mUrl) })).text();
+      } catch (e) {}
+      out.push(buildMasterStream("vidly", mUrl, masterText, "Auto"));
+    }
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
+// ---------- ID mapping ----------
 const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
 
 async function tmdbGet(path) {
@@ -169,7 +230,7 @@ async function mapToTmdb(rawId, mediaType, season, episode, dbg) {
   return null;
 }
 
-// ---------- entry point ----------
+// ---------- Entry point ----------
 async function getStreams(tmdbId, mediaType, season, episode) {
   const dbg = [];
   const fail = (m) => [{ name: "DEBUG " + dbg.concat(m).join(" > ").slice(0, 500), title: dbg.concat(m).join(" > "), url: "https://debug.invalid/", quality: "debug" }];
@@ -177,35 +238,14 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     const m = await mapToTmdb(tmdbId, mediaType, Number(season) || 1, Number(episode) || 1, dbg);
     if (!m) return fail("could not map id " + tmdbId);
     dbg.push("tmdb=" + m.id + " " + m.type + " s" + m.season + "e" + m.episode);
-    const res = await callResolve(m.type, m.id, m.season, m.episode);
-    if (!res.stream) return fail("resolve failed " + res.tried);
 
-    const streams = [];
-    const server = res.stream.server || "vidbolt";
-    for (const src of res.stream.sources) {
-      if (!src || !src.url) continue;
-      const key = (/[?&]api_key=([^&]+)/.exec(src.url) || [])[1] || "";
+    const [vb, vl] = await Promise.all([
+      fetchVidbolt(m.type, m.id, m.season, m.episode),
+      fetchVidly(m.type, m.id, m.season, m.episode),
+    ]);
 
-      let masterText = src.master;
-      if (!masterText) {
-        try { masterText = await (await fetch(src.url, { headers: PLAY_HEADERS })).text(); } catch (e) {}
-      }
-      const parsed = masterText ? parseMaster(masterText, src.url, key) : { media: [], audioTracks: [], variants: [] };
-      const max = parsed.variants.length ? parsed.variants[0].height : 0;
-
-      // Keep only the master stream which includes audio and subtitle tracks
-      if (parsed.audioTracks.length || parsed.variants.length) {
-        streams.push({
-          name: "Redflix",
-          title: server + (parsed.audioTracks.length ? " (Audio)" : " (Master)"),
-          url: src.url,
-          quality: max ? "Auto (up to " + qualityLabel(max) + ")" : (src.quality || "Auto"),
-          headers: PLAY_HEADERS,
-          provider: "redflix",
-        });
-      }
-    }
-    return streams.length ? streams : fail("empty sources");
+    const streams = [...vb, ...vl];
+    return streams.length ? streams : fail("no streams from vidbolt/vidly");
   } catch (e) {
     return fail("ERROR " + (e && e.message));
   }
