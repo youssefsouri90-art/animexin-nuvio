@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
-  "version": "2.0.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz) and movies & TV (cinema.army, mapple, redflix)",
+  "version": "2.1.0",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz) and movies & TV (cinema.army, mapple, redflix, framextv)",
   "scrapers": [
     {
       "id": "animexin",
@@ -68,6 +68,17 @@
       "filename": "providers/redflix.js",
       "enabled": true,
       "formats": ["hls"]
+    },
+    {
+      "id": "framextv",
+      "name": "Framextv",
+      "description": "Movie and TV streams from Framextv",
+      "version": "1.0.0",
+      "author": "you",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/Framextv.js",
+      "enabled": true,
+      "formats": ["hls", "mp4"]
     }
   ]
 }
