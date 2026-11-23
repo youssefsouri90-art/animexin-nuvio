@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
-  "version": "2.0.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, anime3rb.com, animewitcher.com) and movies & TV (cinema.army, mapple, redflix)",
+  "version": "2.1.0",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, anime3rb.com, animewitcher.com, anikage.cc, anikoto.cz) and movies & TV (cinema.army, mapple, redflix)",
   "scrapers": [
     {
       "id": "animexin",
@@ -90,6 +90,17 @@
       "filename": "providers/animewitchr.js",
       "enabled": true,
       "formats": ["mp4"]
+    },
+    {
+      "id": "eclipsia",
+      "name": "Eclipsia Anime",
+      "description": "Unified anime streams combining AniKage and Anikoto sources",
+      "version": "1.0.0",
+      "author": "you",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/eclipsia.js",
+      "enabled": true,
+      "formats": ["hls", "mp4"]
     }
   ]
 }
