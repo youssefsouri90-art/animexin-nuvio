@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
   "version": "2.0.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, anime3rb.com) and movies & TV (cinema.army, mapple, redflix)",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, anime3rb.com, animewitcher.com) and movies & TV (cinema.army, mapple, redflix)",
   "scrapers": [
     {
       "id": "animexin",
@@ -77,6 +77,17 @@
       "author": "you",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/anime3rb.js",
+      "enabled": true,
+      "formats": ["mp4"]
+    },
+    {
+      "id": "animewitchr",
+      "name": "AnimeWitcher",
+      "description": "Arabic anime MP4 streams from animewitcher.com (Algolia + Firestore + Pixeldrain)",
+      "version": "1.0.0",
+      "author": "you",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/animewitchr.js",
       "enabled": true,
       "formats": ["mp4"]
     }
