@@ -96,31 +96,252 @@ const RC256 = [
   0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-function cleanId(rawId) {
+const tmdbCache = new Map();
+
+function fetchWithTimeout(url, options, timeoutMs) {
+  const opts = options || {};
+  const ms = typeof timeoutMs === "number" ? timeoutMs : 6000;
+  if (typeof AbortController === "undefined") {
+    return fetch(url, opts).catch(function () {
+      return null;
+    });
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(function () {
+    controller.abort();
+  }, ms);
+  return fetch(url, Object.assign({}, opts, { signal: controller.signal }))
+    .catch(function () {
+      return null;
+    })
+    .finally(function () {
+      clearTimeout(timer);
+    });
+}
+
+function parseIncomingId(rawId) {
   const s = String(rawId || "").trim();
-  const cleaned = s.replace(/^(tmdb[:_-]?|tt)/i, "").trim();
-  return /^\d+$/.test(cleaned) ? cleaned : null;
+  if (!s) return null;
+
+  const prefixed = s.match(/^(tmdb|mal|myanimelist|kitsu|anilist|tvdb)[:_-](.+)$/i);
+  if (prefixed) {
+    return {
+      source: prefixed[1].toLowerCase(),
+      value: prefixed[2].trim(),
+    };
+  }
+
+  if (/^tt\d+$/i.test(s)) {
+    return { source: "imdb", value: s };
+  }
+
+  if (/^\d+$/.test(s)) {
+    return { source: "numeric", value: s };
+  }
+
+  return { source: "other", value: s };
 }
 
 function normalizeQuery(id, mediaType, season, episode) {
-  const numericId = cleanId(id);
-  if (!numericId) return null;
-  const isTv = mediaType === "tv" || mediaType === "series" || mediaType === "anime";
+  const parsed = parseIncomingId(id);
+  if (!parsed || !parsed.value) return null;
+
+  const isTv =
+    mediaType === "tv" ||
+    mediaType === "series" ||
+    mediaType === "anime" ||
+    mediaType === "show";
   const sNum = Number(season) > 0 ? Number(season) : 1;
   const eNum = isTv ? (Number(episode) > 0 ? Number(episode) : 1) : 1;
+
   return {
-    id: numericId,
+    source: parsed.source,
+    value: parsed.value,
     isTv: isTv,
     season: sNum,
     episode: eNum,
   };
 }
 
-function resolveTmdbIdIfNeeded(q) {
-  if (/^\d+$/.test(q.id)) return Promise.resolve(q.id);
-  return Promise.resolve().then(function () {
-    return q.id;
-  });
+function findTmdbIdFromExternal(source, value, isTv) {
+  const cacheKey = source + ":" + value + ":" + (isTv ? "tv" : "movie");
+  if (tmdbCache.has(cacheKey)) {
+    return Promise.resolve(tmdbCache.get(cacheKey));
+  }
+
+  function saveAndReturn(val) {
+    if (val) tmdbCache.set(cacheKey, String(val));
+    return val ? String(val) : null;
+  }
+
+  if (source === "imdb") {
+    const url =
+      TMDB_API_BASE +
+      "/find/" +
+      encodeURIComponent(value) +
+      "?api_key=" +
+      encodeURIComponent(TMDB_KEY) +
+      "&external_source=imdb_id";
+    return fetchWithTimeout(url, {}, 5000)
+      .then(function (r) {
+        return r && r.ok ? r.json() : null;
+      })
+      .then(function (data) {
+        if (!data) return null;
+        const list = isTv
+          ? data.tv_results || data.movie_results || []
+          : data.movie_results || data.tv_results || [];
+        return saveAndReturn(list[0] && list[0].id);
+      })
+      .catch(function () {
+        return null;
+      });
+  }
+
+  if (source === "tvdb") {
+    const url =
+      TMDB_API_BASE +
+      "/find/" +
+      encodeURIComponent(value) +
+      "?api_key=" +
+      encodeURIComponent(TMDB_KEY) +
+      "&external_source=tvdb_id";
+    return fetchWithTimeout(url, {}, 5000)
+      .then(function (r) {
+        return r && r.ok ? r.json() : null;
+      })
+      .then(function (data) {
+        if (!data) return null;
+        const list = data.tv_results || data.movie_results || [];
+        return saveAndReturn(list[0] && list[0].id);
+      })
+      .catch(function () {
+        return null;
+      });
+  }
+
+  if (source === "mal" || source === "myanimelist" || source === "anilist" || source === "kitsu") {
+    let metaPromise;
+    if (source === "mal" || source === "myanimelist") {
+      metaPromise = fetchWithTimeout(
+        "https://api.jikan.moe/v4/anime/" + encodeURIComponent(value),
+        {},
+        5000
+      )
+        .then(function (r) {
+          return r && r.ok ? r.json() : null;
+        })
+        .then(function (j) {
+          const d = j && j.data;
+          if (!d) return null;
+          return {
+            title: d.title_english || d.title || "",
+            year: (d.year || (d.aired && d.aired.prop && d.aired.prop.from && d.aired.prop.from.year) || ""),
+          };
+        });
+    } else if (source === "anilist") {
+      const gql = JSON.stringify({
+        query:
+          "query ($id: Int) { Media(id: $id, type: ANIME) { title { english romaji } seasonYear } }",
+        variables: { id: Number(value) },
+      });
+      metaPromise = fetchWithTimeout(
+        "https://graphql.anilist.co",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: gql,
+        },
+        5000
+      )
+        .then(function (r) {
+          return r && r.ok ? r.json() : null;
+        })
+        .then(function (g) {
+          const m = g && g.data && g.data.Media;
+          if (!m) return null;
+          return {
+            title: (m.title && (m.title.english || m.title.romaji)) || "",
+            year: m.seasonYear || "",
+          };
+        });
+    } else {
+      metaPromise = fetchWithTimeout(
+        "https://kitsu.io/api/edge/anime/" + encodeURIComponent(value),
+        { headers: { Accept: "application/vnd.api+json" } },
+        5000
+      )
+        .then(function (r) {
+          return r && r.ok ? r.json() : null;
+        })
+        .then(function (k) {
+          const attr = k && k.data && k.data.attributes;
+          if (!attr) return null;
+          const titles = attr.titles || {};
+          return {
+            title: titles.en || titles.en_jp || attr.canonicalTitle || "",
+            year: attr.startDate ? String(attr.startDate).slice(0, 4) : "",
+          };
+        });
+    }
+
+    return metaPromise
+      .then(function (info) {
+        if (!info || !info.title) return null;
+        const endpoint = isTv ? "tv" : "movie";
+        const yearParam = info.year
+          ? isTv
+            ? "&first_air_date_year=" + encodeURIComponent(info.year)
+            : "&year=" + encodeURIComponent(info.year)
+          : "";
+        const searchUrl =
+          TMDB_API_BASE +
+          "/search/" +
+          endpoint +
+          "?api_key=" +
+          encodeURIComponent(TMDB_KEY) +
+          "&query=" +
+          encodeURIComponent(info.title) +
+          yearParam;
+        return fetchWithTimeout(searchUrl, {}, 5000)
+          .then(function (r) {
+            return r && r.ok ? r.json() : null;
+          })
+          .then(function (s) {
+            const first = s && s.results && s.results[0];
+            if (first && first.id) return saveAndReturn(first.id);
+            if (!info.year) return null;
+            const fallbackUrl =
+              TMDB_API_BASE +
+              "/search/" +
+              endpoint +
+              "?api_key=" +
+              encodeURIComponent(TMDB_KEY) +
+              "&query=" +
+              encodeURIComponent(info.title);
+            return fetchWithTimeout(fallbackUrl, {}, 5000)
+              .then(function (r2) {
+                return r2 && r2.ok ? r2.json() : null;
+              })
+              .then(function (s2) {
+                const f2 = s2 && s2.results && s2.results[0];
+                return saveAndReturn(f2 && f2.id);
+              });
+          });
+      })
+      .catch(function () {
+        return null;
+      });
+  }
+
+  return Promise.resolve(null);
+}
+
+function resolveTmdbId(q) {
+  if (q.source === "tmdb" || q.source === "numeric") {
+    return /^\d+$/.test(q.value) ? Promise.resolve(q.value) : Promise.resolve(null);
+  }
+  return findTmdbIdFromExternal(q.source, q.value, q.isTv);
 }
 
 function stableSort(items, compare) {
@@ -362,14 +583,11 @@ function createRunner() {
   function getUnsigned(path) {
     return Promise.resolve()
       .then(function () {
-        return fetch(BASE_URL + path, { headers: defaultHeaders() });
+        return fetchWithTimeout(BASE_URL + path, { headers: defaultHeaders() }, 5000);
       })
       .then(function (response) {
         syncServerClock(response);
         return response;
-      })
-      .catch(function () {
-        return null;
       });
   }
 
@@ -382,9 +600,7 @@ function createRunner() {
     headers["x-cv"] = "94092f52501e";
     if (nonce) headers["x-nonce"] = nonce;
     headers["x-sig"] = signRequest("GET", path, timestamp, nonce || "");
-    return fetch(BASE_URL + path, { headers: headers }).catch(function () {
-      return null;
-    });
+    return fetchWithTimeout(BASE_URL + path, { headers: headers }, 7000);
   }
 
   function fetchNonces() {
@@ -601,106 +817,109 @@ function getStreams(id, mediaType, season, episode) {
     return Promise.resolve([]);
   }
 
-  const runner = createRunner();
-  const baseQuery =
-    "id=" +
-    encodeURIComponent(q.id) +
-    "&type=" +
-    (q.isTv ? "tv" : "movie") +
-    (q.isTv ? "&s=" + q.season + "&e=" + q.episode : "");
+  return resolveTmdbId(q)
+    .then(function (tmdbId) {
+      if (!tmdbId) return [];
 
-  return runner
-    .fetchNonces()
-    .then(function (nonces) {
-      let nonceIndex = 0;
-      return runner
-        .fetchEventStream(baseQuery, nonces[nonceIndex++] || "")
-        .then(function (baseEventText) {
-          const allBaseCandidates = extractCandidates(
-            parseServerSentEvents(baseEventText)
-          );
-          if (!allBaseCandidates.length) return [];
+      const runner = createRunner();
+      const baseQuery =
+        "id=" +
+        encodeURIComponent(tmdbId) +
+        "&type=" +
+        (q.isTv ? "tv" : "movie") +
+        (q.isTv ? "&s=" + q.season + "&e=" + q.episode : "");
 
-          const streams = [];
-          const seenUrls = Object.create(null);
+      return runner.fetchNonces().then(function (nonces) {
+        let nonceIndex = 0;
+        return runner
+          .fetchEventStream(baseQuery, nonces[nonceIndex++] || "")
+          .then(function (baseEventText) {
+            const allBaseCandidates = extractCandidates(
+              parseServerSentEvents(baseEventText)
+            );
+            if (!allBaseCandidates.length) return [];
 
-          let englishSubs = [];
-          if (allowedProviders.length > 0) {
-            let engCandidates = allBaseCandidates.filter(function (c) {
-              return (
-                !c.dub &&
-                allowedProviders.indexOf(c.provider.toLowerCase()) !== -1
-              );
+            const streams = [];
+            const seenUrls = Object.create(null);
+
+            let englishSubs = [];
+            if (allowedProviders.length > 0) {
+              let engCandidates = allBaseCandidates.filter(function (c) {
+                return (
+                  !c.dub &&
+                  allowedProviders.indexOf(c.provider.toLowerCase()) !== -1
+                );
+              });
+              if (engCandidates.length > 0) {
+                engCandidates = stableSort(engCandidates, function (a, b) {
+                  return scoreCandidate(b) - scoreCandidate(a);
+                });
+                englishSubs = engCandidates[0].inlineSubs;
+                pushGroup(streams, seenUrls, engCandidates, englishSubs, null);
+              }
+            }
+
+            if (allowedLangs.length === 0) return streams;
+
+            const coveredDubLangs = [];
+            const dubGroups = Object.create(null);
+            const baseDubLangs = [];
+            for (let i = 0; i < allBaseCandidates.length; i++) {
+              const c = allBaseCandidates[i];
+              if (!c.dub || allowedLangs.indexOf(c.lang) === -1) continue;
+              if (!dubGroups[c.lang]) {
+                dubGroups[c.lang] = [];
+                baseDubLangs.push(c.lang);
+              }
+              dubGroups[c.lang].push(c);
+            }
+            for (let j = 0; j < baseDubLangs.length; j++) {
+              const lang = baseDubLangs[j];
+              if (
+                pushGroup(
+                  streams,
+                  seenUrls,
+                  dubGroups[lang],
+                  englishSubs,
+                  langName(lang)
+                )
+              ) {
+                coveredDubLangs.push(lang);
+              }
+            }
+
+            const missingDubLangs = allowedLangs.filter(function (code) {
+              return coveredDubLangs.indexOf(code) === -1;
             });
-            if (engCandidates.length > 0) {
-              engCandidates = stableSort(engCandidates, function (a, b) {
-                return scoreCandidate(b) - scoreCandidate(a);
-              });
-              englishSubs = engCandidates[0].inlineSubs;
-              pushGroup(streams, seenUrls, engCandidates, englishSubs, null);
-            }
-          }
+            if (missingDubLangs.length === 0) return streams;
 
-          if (allowedLangs.length === 0) return streams;
-
-          const coveredDubLangs = [];
-          const dubGroups = Object.create(null);
-          const baseDubLangs = [];
-          for (let i = 0; i < allBaseCandidates.length; i++) {
-            const c = allBaseCandidates[i];
-            if (!c.dub || allowedLangs.indexOf(c.lang) === -1) continue;
-            if (!dubGroups[c.lang]) {
-              dubGroups[c.lang] = [];
-              baseDubLangs.push(c.lang);
-            }
-            dubGroups[c.lang].push(c);
-          }
-          for (let j = 0; j < baseDubLangs.length; j++) {
-            const lang = baseDubLangs[j];
-            if (
-              pushGroup(
-                streams,
-                seenUrls,
-                dubGroups[lang],
-                englishSubs,
-                langName(lang)
-              )
-            ) {
-              coveredDubLangs.push(lang);
-            }
-          }
-
-          const missingDubLangs = allowedLangs.filter(function (code) {
-            return coveredDubLangs.indexOf(code) === -1;
+            return Promise.all(
+              missingDubLangs.map(function (code) {
+                return runner.fetchEventStream(
+                  baseQuery + "&dubs=1&al=" + encodeURIComponent(code),
+                  nonces[nonceIndex++] || ""
+                );
+              })
+            ).then(function (dubEventTexts) {
+              for (let d = 0; d < missingDubLangs.length; d++) {
+                const dubLang = missingDubLangs[d];
+                const dubCandidates = extractCandidates(
+                  parseServerSentEvents(dubEventTexts[d])
+                ).filter(function (candidate) {
+                  return candidate.dub && candidate.lang === dubLang;
+                });
+                pushGroup(
+                  streams,
+                  seenUrls,
+                  dubCandidates,
+                  englishSubs,
+                  langName(dubLang)
+                );
+              }
+              return streams;
+            });
           });
-          if (missingDubLangs.length === 0) return streams;
-
-          return Promise.all(
-            missingDubLangs.map(function (code) {
-              return runner.fetchEventStream(
-                baseQuery + "&dubs=1&al=" + encodeURIComponent(code),
-                nonces[nonceIndex++] || ""
-              );
-            })
-          ).then(function (dubEventTexts) {
-            for (let d = 0; d < missingDubLangs.length; d++) {
-              const dubLang = missingDubLangs[d];
-              const dubCandidates = extractCandidates(
-                parseServerSentEvents(dubEventTexts[d])
-              ).filter(function (candidate) {
-                return candidate.dub && candidate.lang === dubLang;
-              });
-              pushGroup(
-                streams,
-                seenUrls,
-                dubCandidates,
-                englishSubs,
-                langName(dubLang)
-              );
-            }
-            return streams;
-          });
-        });
+      });
     })
     .catch(function () {
       return [];
