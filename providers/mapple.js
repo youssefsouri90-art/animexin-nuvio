@@ -212,6 +212,7 @@ function solvePow(challenge, difficulty, maxIter) {
 
 // ================= Mapple provider =================
 const BASE = "https://mapple.fun";
+const TMDB_API_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
 const UA = {
   "User-Agent":
     "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36",
@@ -229,19 +230,11 @@ const BROWSER = Object.assign({}, UA, {
   Referer: BASE + "/",
 });
 
-// Source ids tried in order. The site has added s16/s19/s25/s27/s28 since the
-// original provider was written; omitting them was the main reason for sparse results.
-// "mapple" is the site's default source and was missing from the old list.
-// Put the newer/high-quality sources first so the first response is not limited
-// to the older 720p providers while the remaining sources are still loading.
 const SOURCES = ["mapple", "s28", "s25", "s27", "s19", "s16", "s1", "s8", "s2", "s3", "s4", "s9", "s10", "s12", "s6", "s7"];
-// Try several working servers. The old value (3) often returned too few choices.
 const MAX_OK = 6;
 const SITE_SUBS = true;
-const PROBE = false; // probing burns the short-lived token and can make playback less reliable
+const PROBE = false;
 
-// OpenSubtitles application API. Search is free; anonymous downloads have a
-// small quota, so fetch at most one Arabic and one English file per title/episode.
 const OS_BASE = "https://api.opensubtitles.com/api/v1";
 const OS_API_KEY = "p3XAEclHlMLgcbKZkP9y11t1XORnzgxs";
 const OS_LANGS = ["ar", "en"];
@@ -274,6 +267,139 @@ function withTimeout(promise, ms) {
     promise,
     new Promise((resolve) => setTimeout(() => resolve({ fail: "TIMEOUT" }), ms)),
   ]);
+}
+
+// ---------- Kitsu / IMDb -> TMDB mapping ----------
+function normTitle(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function titleSim(a, b) {
+  var A = normTitle(a).split(" ").filter(Boolean);
+  var B = normTitle(b).split(" ").filter(Boolean);
+  if (!A.length || !B.length) return 0;
+  var setB = {};
+  for (var j = 0; j < B.length; j++) setB[B[j]] = 1;
+  var hit = 0;
+  for (var i = 0; i < A.length; i++) {
+    if (setB[A[i]]) hit++;
+  }
+  return hit / Math.max(A.length, B.length, 1);
+}
+
+async function tmdbJson(path) {
+  try {
+    var sep = path.indexOf("?") >= 0 ? "&" : "?";
+    var r = await fetch("https://api.themoviedb.org/3/" + path + sep + "api_key=" + TMDB_API_KEY, { headers: UA });
+    return await r.json();
+  } catch (e) {
+    return {};
+  }
+}
+
+async function resolveMediaId(rawId, mediaType, season, episode) {
+  var s = String(rawId || "").trim().replace(/^tmdb:/i, "");
+  var sn = Number(season) || 1;
+  var ep = Number(episode) || 1;
+
+  if (/^\d+$/.test(s)) {
+    return { id: Number(s), isTv: mediaType !== "movie", season: sn, episode: ep };
+  }
+
+  var imdb = /^(tt\d+)/.exec(s);
+  if (imdb) {
+    var found = await withTimeout(tmdbJson("find/" + imdb[1] + "?external_source=imdb_id"), 4500);
+    var tvHit = found && found.tv_results && found.tv_results[0];
+    var movHit = found && found.movie_results && found.movie_results[0];
+    var hit = tvHit || movHit;
+    if (!hit) return null;
+    return { id: Number(hit.id), isTv: !!tvHit, season: sn, episode: ep };
+  }
+
+  var kitsu = /^kitsu:(\d+)(?::(\d+))?/.exec(s);
+  if (kitsu) {
+    var kitsuId = kitsu[1];
+    if (!episode && kitsu[2]) ep = Number(kitsu[2]) || 1;
+    var kr = await withTimeout(
+      fetch("https://kitsu.io/api/edge/anime/" + kitsuId, { headers: { Accept: "application/vnd.api+json" } }),
+      4500
+    );
+    if (!kr || !kr.ok) return null;
+    var kj = await kr.json();
+    var attrs = (kj && kj.data && kj.data.attributes) || {};
+    var titles = [
+      attrs.titles && attrs.titles.en,
+      attrs.canonicalTitle,
+      attrs.titles && attrs.titles.en_jp,
+    ].filter(Boolean);
+    if (!titles.length) return null;
+
+    var isMovie = attrs.subtype === "movie" || mediaType === "movie";
+    var best = null;
+
+    for (var i = 0; i < titles.length; i++) {
+      var q = titles[i]
+        .replace(/\b(\d+)(st|nd|rd|th)\s+season\b/gi, " ")
+        .replace(/\bseason\s*\d+\b/gi, " ")
+        .replace(/\bpart\s*\d+\b/gi, " ")
+        .replace(/\s+/g, " ")
+        .trim() || titles[i];
+      var endpoint = isMovie ? "search/movie" : "search/tv";
+      var sr = await withTimeout(tmdbJson(endpoint + "?query=" + encodeURIComponent(q)), 4500);
+      var list = (sr && sr.results) || [];
+      for (var rIdx = 0; rIdx < Math.min(list.length, 6); rIdx++) {
+        var item = list[rIdx];
+        var sc = Math.max(
+          titleSim(q, item.name || item.title),
+          titleSim(q, item.original_name || item.original_title)
+        );
+        if (!best || sc > best.sc) best = { id: item.id, sc: sc };
+      }
+      if (best && best.sc >= 0.75) break;
+    }
+
+    if (!best || best.sc < 0.35) return null;
+    if (isMovie) {
+      return { id: Number(best.id), isTv: false, season: 1, episode: 1 };
+    }
+
+    var targetSeason = 1;
+    var targetEpisode = ep;
+    var seasonHint = null;
+    for (var tIdx = 0; tIdx < titles.length; tIdx++) {
+      var mSeason = /(\d+)(?:st|nd|rd|th)\s+season|season\s*(\d+)/i.exec(titles[tIdx]);
+      if (mSeason) {
+        seasonHint = parseInt(mSeason[1] || mSeason[2], 10);
+        break;
+      }
+    }
+
+    if (seasonHint) {
+      targetSeason = seasonHint;
+    } else {
+      var det = await withTimeout(tmdbJson("tv/" + best.id), 4500);
+      var seasons = ((det && det.seasons) || []).filter(function (x) {
+        return x.season_number > 0;
+      });
+      var left = ep;
+      for (var sIdx = 0; sIdx < seasons.length; sIdx++) {
+        var sObj = seasons[sIdx];
+        if (left <= sObj.episode_count) {
+          targetSeason = sObj.season_number;
+          targetEpisode = left;
+          break;
+        }
+        left -= sObj.episode_count;
+      }
+    }
+
+    return { id: Number(best.id), isTv: true, season: targetSeason, episode: targetEpisode };
+  }
+
+  return null;
 }
 
 // ---------- session (cookie + request token) ----------
@@ -364,7 +490,6 @@ async function fetchOpenSubtitles(id, isTv, season, episode) {
     const candidates = OS_LANGS.map((lang) => best[lang]).filter(Boolean);
     const downloaded = await Promise.all(candidates.map(async (item) => {
       const r = await withTimeout(osRequest("POST", "/download", { file_id: Number(item.fileId), sub_format: "srt" }), 4500);
-      // OpenSubtitles returns link at the top level (not inside data).
       const d = r && r.json ? (r.json.data || r.json) : {};
       const url = d.link || d.url || d.download_url;
       return url ? { url: url, lang: item.lang, language: item.lang, label: item.label, name: item.name } : null;
@@ -389,7 +514,7 @@ async function openSession(pagePath) {
     DIAG.push("cookie=" + (sess.cookie ? "yes" : "none"));
     await r.text();
   } catch (e) { DIAG.push("page err"); }
-  if (sess.cookie) await sleep(1500); // fresh cookies were accepted after a short pause in tests
+  if (sess.cookie) await sleep(1500);
   const s = await api(sess, "POST", "/api/ui/session", {});
   sess.requestToken = s.json && s.json.token;
   if (!sess.requestToken) DIAG.push("session " + s.status + " " + String(s.text).slice(0, 40));
@@ -398,8 +523,6 @@ async function openSession(pagePath) {
 
 // media-session token: proof of work, valid ~120 s
 async function getMediaToken(sess, id, type, scope) {
-  // Mapple's current API calls this field tv_slug. Sending mediaScope causes
-  // HTTP 400 "Invalid media" for every TV episode.
   const base = { mediaId: id, mediaType: type, tv_slug: scope, requestToken: sess.requestToken };
   const c = await api(sess, "POST", "/api/media-session", base);
   if (!c.json || !c.json.pow) { DIAG.push("ms " + c.status + " " + String(c.text).slice(0, 40)); return ""; }
@@ -437,7 +560,7 @@ async function expandHls(masterUrl, hdrs) {
     const r = await fetch(masterUrl, { headers: hdrs });
     const txt = await r.text();
     if (txt.indexOf("#EXTM3U") !== 0) { DIAG.push("m3u8? " + r.status); return out; }
-    if (txt.indexOf("#EXT-X-STREAM-INF") < 0) return out; // already a media playlist
+    if (txt.indexOf("#EXT-X-STREAM-INF") < 0) return out;
     const lines = txt.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -476,7 +599,6 @@ async function expandHls(masterUrl, hdrs) {
 }
 
 function toSubtitles(d) {
-  // Mapple has used more than one spelling/shape for subtitle tracks over time.
   const raw = d && (d.subtitles || d.subtitle || d.subtitleTracks || d.captionTracks || d.tracks || d.captions);
   const arr = Array.isArray(raw) ? raw : (raw && typeof raw === "object" ? Object.keys(raw).map((k) => raw[k]) : []);
   const out = [];
@@ -521,21 +643,16 @@ async function getStreams(tmdbId, mediaType, season, episode) {
   };
 
   try {
-    const idStr = String(tmdbId).replace(/^tmdb:/i, "");
-    if (!/^\d+$/.test(idStr)) return fail("unsupported id " + String(tmdbId).slice(0, 20));
-    const id = Number(idStr);
-    const isTv = mediaType !== "movie";
+    const target = await resolveMediaId(tmdbId, mediaType, season, episode);
+    if (!target) return fail("unsupported id " + String(tmdbId).slice(0, 20));
+    const id = target.id;
+    const isTv = target.isTv;
     const type = isTv ? "tv" : "movie";
-    // TV scope format is UNVERIFIED (movies use an empty string): "<season>-<episode>"
-    const scope = isTv ? (Number(season) || 1) + "-" + (Number(episode) || 1) : "";
+    const scope = isTv ? target.season + "-" + target.episode : "";
     dbg.push(type + " " + id + (scope ? " " + scope : ""));
 
-    // Start subtitle lookup before Mapple's proof-of-work so it does not add
-    // another serial network phase to stream discovery.
-    const externalSubsPromise = fetchOpenSubtitles(id, isTv, season, episode);
+    const externalSubsPromise = fetchOpenSubtitles(id, isTv, target.season, target.episode);
 
-    // Mapple's TV route is /watch/tv/<id>-<season>-<episode>.
-    // /watch/tv/<id> returns "Invalid Path Format" and produces unusable TV tokens.
     const pagePath = isTv ? "/watch/tv/" + id + "-" + scope : "/watch/movie/" + id;
     const sess = await openSession(pagePath);
     if (!sess) return fail("no session");
@@ -546,10 +663,6 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     const externalSubs = await externalSubsPromise;
 
     const found = [];
-    // Do not wait for every source sequentially: one dead server used to keep
-    // Nuvio on "Finding streams..." until its global timeout.
-    // Two larger batches keep the provider below Nuvio's stream-discovery
-    // timeout when several Mapple upstreams are cooling down at once.
     for (let i = 0; i < SOURCES.length && found.length < MAX_OK; i += 8) {
       const batch = SOURCES.slice(i, i + 8);
       const results = await Promise.all(batch.map(async (src) => {
