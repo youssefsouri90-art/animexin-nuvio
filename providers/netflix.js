@@ -39,8 +39,8 @@ const PLAY_UA =
 const OTT = "nf";
 const API_TTL = 86400000;
 const TOKEN_TTL = 3600000;
-
 const memCache = {};
+const DIAG = [];
 
 function cacheGet(key, ttl) {
   const entry = memCache[key];
@@ -56,7 +56,7 @@ function cacheSet(key, val) {
   memCache[key] = { ts: Date.now(), val: val };
 }
 
-function base64Decode(str) {
+function b64Decode(str) {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
   const input = String(str || "").replace(/[^A-Za-z0-9+/=]/g, "");
   let output = "";
@@ -74,6 +74,48 @@ function base64Decode(str) {
     if (enc4 !== 64) output += String.fromCharCode(chr3);
   }
   return output;
+}
+
+function withTimeout(promise, ms) {
+  if (typeof setTimeout !== "function") return promise;
+  return Promise.race([
+    promise,
+    new Promise(function (_, reject) {
+      setTimeout(function () {
+        reject(new Error("timeout"));
+      }, ms || 6000);
+    })
+  ]);
+}
+
+async function safeJson(url, options, tag) {
+  try {
+    const res = await withTimeout(fetch(url, options || {}), 6000);
+    if (!res || !res.ok) {
+      if (tag) DIAG.push(tag + ":" + (res ? res.status : "nores"));
+      return null;
+    }
+    const txt = await withTimeout(res.text(), 6000);
+    try {
+      return JSON.parse(txt);
+    } catch (e) {
+      if (tag) DIAG.push(tag + ":badjson");
+      return null;
+    }
+  } catch (e) {
+    if (tag) DIAG.push(tag + ":" + String((e && e.message) || "err").slice(0, 20));
+    return null;
+  }
+}
+
+function nfHeaders() {
+  return {
+    "User-Agent": MOBILE_UA,
+    "Accept": "application/json, text/plain, */*",
+    "Referer": BASE_URL + "/",
+    "Origin": VERIFY_ORIGIN,
+    "X-Requested-With": "XMLHttpRequest"
+  };
 }
 
 function normText(s) {
@@ -104,27 +146,6 @@ function dedupeTitles(list) {
   return out;
 }
 
-async function safeJson(url, options) {
-  try {
-    const res = await fetch(url, options || {});
-    if (!res || !res.ok) return null;
-    const txt = await res.text();
-    return JSON.parse(txt);
-  } catch (e) {
-    return null;
-  }
-}
-
-function nfHeaders() {
-  return {
-    "User-Agent": MOBILE_UA,
-    "Accept": "application/json, text/plain, */*",
-    "Referer": BASE_URL + "/",
-    "Origin": VERIFY_ORIGIN,
-    "X-Requested-With": "XMLHttpRequest"
-  };
-}
-
 async function fetchTmdbMeta(cleanNumeric, endpoint) {
   const j = await safeJson(
     "https://api.themoviedb.org/3/" +
@@ -133,7 +154,9 @@ async function fetchTmdbMeta(cleanNumeric, endpoint) {
       cleanNumeric +
       "?api_key=" +
       TMDB_API_KEY +
-      "&append_to_response=alternative_titles"
+      "&append_to_response=alternative_titles",
+    {},
+    "tmdb"
   );
   if (!j) return { titles: [], year: null };
 
@@ -204,9 +227,12 @@ async function searchNetMirror(titles, year) {
   for (let i = 0; i < titles.length; i++) {
     const q = titles[i];
     const url = BASE_URL + "/mobile/search.php?s=" + encodeURIComponent(q) + "&t=" + Date.now();
-    const json = await safeJson(url, { method: "GET", headers: nfHeaders() });
+    const json = await safeJson(url, { method: "GET", headers: nfHeaders() }, "search");
     if (!json) continue;
-    if (String(json.head || "").toLowerCase().indexOf("top searches") !== -1) continue;
+    if (String(json.head || "").toLowerCase().indexOf("top searches") !== -1) {
+      DIAG.push("top-searches");
+      continue;
+    }
 
     const list = Array.isArray(json.searchResult) ? json.searchResult : [];
     let winner = null;
@@ -229,7 +255,7 @@ async function searchNetMirror(titles, year) {
 
 async function resolveEpisodeId(postId, season, episode) {
   const postUrl = BASE_URL + "/mobile/post.php?id=" + encodeURIComponent(postId) + "&t=" + Date.now();
-  const postData = await safeJson(postUrl, { method: "GET", headers: nfHeaders() });
+  const postData = await safeJson(postUrl, { method: "GET", headers: nfHeaders() }, "post");
   if (!postData) return String(postId);
 
   let episodes = Array.isArray(postData.episodes) ? postData.episodes : [];
@@ -253,7 +279,7 @@ async function resolveEpisodeId(postId, season, episode) {
         "&t=" +
         Date.now() +
         "&page=1";
-      const sJson = await safeJson(epUrl, { method: "GET", headers: nfHeaders() });
+      const sJson = await safeJson(epUrl, { method: "GET", headers: nfHeaders() }, "eps");
       if (sJson && Array.isArray(sJson.episodes) && sJson.episodes.length > 0) {
         episodes = sJson.episodes;
       }
@@ -284,17 +310,18 @@ async function resolveApiBase(force) {
   };
 
   for (let i = 0; i < NEWTV_DOMAIN_SEEDS_B64.length; i++) {
-    const domain = base64Decode(NEWTV_DOMAIN_SEEDS_B64[i]).replace(/\/+$/, "");
+    const domain = b64Decode(NEWTV_DOMAIN_SEEDS_B64[i]).replace(/\/+$/, "");
     if (!domain) continue;
     const j = await safeJson(domain + "/checknewtv.php", { method: "GET", headers: headers });
     if (j && j.token_hash && String(j.token_hash).trim()) {
-      const resolved = base64Decode(String(j.token_hash).trim()).replace(/\/+$/, "");
+      const resolved = b64Decode(String(j.token_hash).trim()).replace(/\/+$/, "");
       if (resolved) {
         cacheSet("nf_newtv_api", resolved);
         return resolved;
       }
     }
   }
+  DIAG.push("seed:fail");
   return null;
 }
 
@@ -305,15 +332,19 @@ async function resolveUserToken(apiBase, force) {
     if (cached) return cached;
   }
 
-  const j = await safeJson(apiBase + "/newtv/otp.php", {
-    method: "GET",
-    headers: {
-      "accept": "application/json, text/plain, */*",
-      "otp": "111111",
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0 /OS.Gatu v1.0"
-    }
-  });
+  const j = await safeJson(
+    apiBase + "/newtv/otp.php",
+    {
+      method: "GET",
+      headers: {
+        "accept": "application/json, text/plain, */*",
+        "otp": "111111",
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0 /OS.Gatu v1.0"
+      }
+    },
+    "otp"
+  );
 
   if (j && j.usertoken) {
     cacheSet(key, j.usertoken);
@@ -331,15 +362,19 @@ async function requestPlayer(mediaId) {
   async function runOnce(forceToken) {
     const token = await resolveUserToken(apiBase, forceToken);
     if (!token) return null;
-    return await safeJson(url, {
-      method: "GET",
-      headers: {
-        "Ott": OTT,
-        "Usertoken": token,
-        "X-Requested-With": "NetmirrorNewTV v1.0",
-        "User-Agent": NEWTV_UA
-      }
-    });
+    return await safeJson(
+      url,
+      {
+        method: "GET",
+        headers: {
+          "Ott": OTT,
+          "Usertoken": token,
+          "X-Requested-With": "NetmirrorNewTV v1.0",
+          "User-Agent": NEWTV_UA
+        }
+      },
+      "player"
+    );
   }
 
   let data = await runOnce(false);
@@ -364,14 +399,35 @@ function mapSubtitles(data) {
     });
 }
 
+function dbgStreams(reason, extra) {
+  const msg = [reason].concat(extra || [], DIAG).filter(Boolean).join(" > ");
+  const out = [];
+  for (let i = 0; i < 4; i++) {
+    const part = msg.slice(i * 55, (i + 1) * 55);
+    if (!part) break;
+    out.push({
+      name: "NF-DBG" + (i + 1) + ": " + part,
+      title: msg,
+      url: "https://debug.invalid/nf/" + (i + 1),
+      quality: "debug"
+    });
+  }
+  return out;
+}
+
 async function getStreams(id, mediaType, season, episode) {
+  DIAG.length = 0;
   try {
     const isMovie = mediaType === "movie";
     const meta = await resolveTitlesFromId(id, mediaType);
-    if (!meta.titles.length) return [];
+    if (!meta.titles.length) {
+      return dbgStreams("no-titles", ["id=" + id, "type=" + mediaType]);
+    }
 
     const match = await searchNetMirror(meta.titles, meta.year);
-    if (!match || !match.id) return [];
+    if (!match || !match.id) {
+      return dbgStreams("not-found", ["q=" + meta.titles[0]]);
+    }
 
     const postId = String(match.id);
     const targetId = isMovie ? postId : await resolveEpisodeId(postId, season, episode);
@@ -380,7 +436,9 @@ async function getStreams(id, mediaType, season, episode) {
     if ((!player || !player.video_link) && targetId !== postId) {
       player = await requestPlayer(postId);
     }
-    if (!player || !player.video_link) return [];
+    if (!player || !player.video_link) {
+      return dbgStreams("no-link", ["id=" + targetId]);
+    }
 
     const baseTitle = match.t || match.title || meta.titles[0];
     const epLabel = isMovie ? "" : " S" + (Number(season) || 1) + "E" + (Number(episode) || 1);
@@ -399,7 +457,7 @@ async function getStreams(id, mediaType, season, episode) {
       }
     ];
   } catch (e) {
-    return [];
+    return dbgStreams("err", [String((e && e.message) || e)]);
   }
 }
 
