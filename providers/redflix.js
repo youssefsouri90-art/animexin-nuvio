@@ -57,11 +57,24 @@ async function callResolve(type, id, season, episode) {
 
 function parseMaster(text, baseUrl, key) {
   const lines = text.split(/\r?\n/);
-  const media = [], variants = [];
+  const media = [], audioTracks = [], variants = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (line.indexOf("#EXT-X-MEDIA") === 0) {
-      media.push(line.replace(/URI="([^"]+)"/, (m, u) => 'URI="' + withKey(absUrl(baseUrl, u), key) + '"'));
+      const updated = line.replace(/URI="([^"]+)"/, (m, u) => 'URI="' + withKey(absUrl(baseUrl, u), key) + '"');
+      media.push(updated);
+      if (/TYPE=AUDIO/.test(updated)) {
+        const uriMatch = /URI="([^"]+)"/.exec(updated);
+        const nameMatch = /NAME="([^"]+)"/.exec(updated);
+        const langMatch = /LANGUAGE="([^"]+)"/.exec(updated);
+        if (uriMatch && uriMatch[1]) {
+          audioTracks.push({
+            url: uriMatch[1],
+            name: (nameMatch && nameMatch[1]) || "Audio",
+            lang: (langMatch && langMatch[1]) || "",
+          });
+        }
+      }
     } else if (line.indexOf("#EXT-X-STREAM-INF") === 0) {
       let next = "";
       for (let k = i + 1; k < lines.length; k++) {
@@ -75,7 +88,7 @@ function parseMaster(text, baseUrl, key) {
     }
   }
   variants.sort((a, b) => b.height - a.height);
-  return { media, variants };
+  return { media, audioTracks, variants };
 }
 
 const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
@@ -173,7 +186,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       if (!masterText) {
         try { masterText = await (await fetch(src.url, { headers: PLAY_HEADERS })).text(); } catch (e) {}
       }
-      const parsed = masterText ? parseMaster(masterText, src.url, key) : { media: [], variants: [] };
+      const parsed = masterText ? parseMaster(masterText, src.url, key) : { media: [], audioTracks: [], variants: [] };
       const max = parsed.variants.length ? parsed.variants[0].height : 0;
 
       streams.push({
@@ -191,6 +204,18 @@ async function getStreams(tmdbId, mediaType, season, episode) {
           title: server + " (" + qualityLabel(v.height) + " direct)",
           url: v.url,
           quality: qualityLabel(v.height),
+          headers: PLAY_HEADERS,
+          provider: "redflix",
+        })
+      );
+
+      // Expose direct audio playlists so you can verify audio playback in Nuvio
+      parsed.audioTracks.forEach((a) =>
+        streams.push({
+          name: "Redflix Audio",
+          title: server + " (" + a.name + ")",
+          url: a.url,
+          quality: "Audio",
           headers: PLAY_HEADERS,
           provider: "redflix",
         })
