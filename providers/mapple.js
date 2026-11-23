@@ -388,12 +388,134 @@ async function resolveMediaId(rawId, mediaType, season, episode) {
   return null;
 }
 
-// ---------- SubDL subtitles ----------
+// ---------- SubDL subtitles + ZIP extraction ----------
 function subdlLangCode(value) {
   var s = String(value || "").toLowerCase().replace(/_/g, "-");
   if (s === "ar" || s === "arabic" || s === "ara" || s.indexOf("ar-") === 0) return "ar";
   if (s === "en" || s === "english" || s === "eng" || s.indexOf("en-") === 0) return "en";
   return s.slice(0, 2);
+}
+
+function utf8ToBase64(str) {
+  var bytes = [];
+  for (var i = 0; i < str.length; i++) {
+    var c = str.charCodeAt(i);
+    if (c < 0x80) {
+      bytes.push(c);
+    } else if (c < 0x800) {
+      bytes.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+    } else if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
+      var c2 = str.charCodeAt(++i);
+      var cp = 0x10000 + (((c & 0x3ff) << 10) | (c2 & 0x3ff));
+      bytes.push(
+        0xf0 | (cp >> 18),
+        0x80 | ((cp >> 12) & 0x3f),
+        0x80 | ((cp >> 6) & 0x3f),
+        0x80 | (cp & 0x3f)
+      );
+    } else {
+      bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+    }
+  }
+  var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  var out = "";
+  for (var j = 0; j < bytes.length; j += 3) {
+    var b0 = bytes[j];
+    var b1 = j + 1 < bytes.length ? bytes[j + 1] : 0;
+    var b2 = j + 2 < bytes.length ? bytes[j + 2] : 0;
+    var n = (b0 << 16) | (b1 << 8) | b2;
+    out += chars[(n >> 18) & 63] + chars[(n >> 12) & 63];
+    out += j + 1 < bytes.length ? chars[(n >> 6) & 63] : "=";
+    out += j + 2 < bytes.length ? chars[n & 63] : "=";
+  }
+  return out;
+}
+
+function srtToVtt(rawText) {
+  var clean = String(rawText || "").replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!clean) return "";
+  if (clean.indexOf("WEBVTT") === 0) return clean;
+  var fixed = clean.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, "$1.$2");
+  return "WEBVTT\n\n" + fixed;
+}
+
+function decodeBytes(bytes) {
+  try {
+    if (typeof TextDecoder !== "undefined") {
+      return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    }
+  } catch (e) {}
+  var out = "";
+  for (var i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
+  return out;
+}
+
+async function inflateRawBytes(bytes) {
+  if (typeof DecompressionStream !== "undefined") {
+    try {
+      var ds = new DecompressionStream("deflate-raw");
+      var writer = ds.writable.getWriter();
+      writer.write(bytes);
+      writer.close();
+      var buf = await new Response(ds.readable).arrayBuffer();
+      return new Uint8Array(buf);
+    } catch (e) {}
+  }
+  return null;
+}
+
+async function extractSubtitleDataUrlFromZip(zipUrl) {
+  try {
+    var r = await withTimeout(fetch(zipUrl, { headers: { "User-Agent": "Nuvio Mapple Provider v1.0" } }), 5000);
+    if (!r || !r.ok) return null;
+    var ab = await r.arrayBuffer();
+    var u8 = new Uint8Array(ab);
+    if (u8.length < 30 || u8[0] !== 0x50 || u8[1] !== 0x4b || u8[2] !== 0x03 || u8[3] !== 0x04) {
+      var directTxt = decodeBytes(u8);
+      if (/-->/.test(directTxt)) {
+        return "data:text/vtt;charset=utf-8;base64," + utf8ToBase64(srtToVtt(directTxt));
+      }
+      return null;
+    }
+
+    var view = new DataView(ab);
+    var pos = 0;
+    while (pos + 30 <= u8.length) {
+      if (view.getUint32(pos, true) !== 0x04034b50) break;
+      var method = view.getUint16(pos + 8, true);
+      var compSize = view.getUint32(pos + 18, true);
+      var nameLen = view.getUint16(pos + 26, true);
+      var extraLen = view.getUint16(pos + 28, true);
+      var nameStart = pos + 30;
+      var nameEnd = nameStart + nameLen;
+      var dataStart = nameEnd + extraLen;
+      var dataEnd = dataStart + compSize;
+      if (dataEnd > u8.length) break;
+
+      var fileName = decodeBytes(u8.subarray(nameStart, nameEnd)).toLowerCase();
+      var entryBytes = u8.subarray(dataStart, dataEnd);
+
+      if (/\.(srt|vtt|ass|ssa)$/i.test(fileName)) {
+        var rawEntry = null;
+        if (method === 0) {
+          rawEntry = entryBytes;
+        } else if (method === 8) {
+          rawEntry = await inflateRawBytes(entryBytes);
+        }
+        if (rawEntry) {
+          var subText = decodeBytes(rawEntry);
+          var vtt = srtToVtt(subText);
+          if (vtt) {
+            return "data:text/vtt;charset=utf-8;base64," + utf8ToBase64(vtt);
+          }
+        }
+      }
+      pos = dataEnd;
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
 }
 
 async function fetchSubdlSubtitles(id, isTv, season, episode) {
@@ -424,7 +546,7 @@ async function fetchSubdlSubtitles(id, isTv, season, episode) {
     var json = await r.json();
     var list = (json && Array.isArray(json.subtitles)) ? json.subtitles : [];
     var perLang = {};
-    var out = [];
+    var selected = [];
 
     for (var i = 0; i < list.length; i++) {
       var item = list[i] || {};
@@ -443,7 +565,7 @@ async function fetchSubdlSubtitles(id, isTv, season, episode) {
       var baseLabel = lang === "ar" ? "Arabic (SubDL)" : "English (SubDL)";
       var label = relName ? baseLabel + " - " + relName.slice(0, 26) : baseLabel;
 
-      out.push({
+      selected.push({
         url: fullUrl,
         lang: lang,
         language: lang,
@@ -452,12 +574,23 @@ async function fetchSubdlSubtitles(id, isTv, season, episode) {
       });
     }
 
-    // Put Arabic first, then English
-    out.sort(function (a, b) {
+    selected.sort(function (a, b) {
       if (a.lang === b.lang) return 0;
       return a.lang === "ar" ? -1 : 1;
     });
-    return out;
+
+    var resolved = await Promise.all(selected.map(async function (sub) {
+      var extracted = await extractSubtitleDataUrlFromZip(sub.url);
+      return {
+        url: extracted || sub.url,
+        lang: sub.lang,
+        language: sub.language,
+        label: sub.label,
+        name: sub.name,
+      };
+    }));
+
+    return resolved;
   } catch (e) {
     return [];
   }
@@ -667,7 +800,6 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       const full = absUrl(BASE + "/", su);
       const PH = Object.assign({}, UA, { Referer: BASE + "/", Origin: BASE });
       const subs = [];
-      // Put SubDL subtitles first so Arabic/English appear at the top
       externalSubs.forEach((s) => {
         if (!subs.some((x) => x.url === s.url)) subs.push(s);
       });
