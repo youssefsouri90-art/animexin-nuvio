@@ -5,6 +5,7 @@
   var VOD_ORIGIN = "https://vod.spacetoongo.com/asset";
   var PEGASUS_ORIGIN = "https://pegasus.5387692.xyz/api/hls";
   var KEY_STR = "7annaba3l_loves_crypto_safe_key!@";
+  var TMDB_API_KEY = "439c478a771f35c05022f9feabcca01c";
 
   var DEFAULT_HEADERS = {
     "User-Agent":
@@ -205,8 +206,9 @@
     return utf8BytesToStr(out.slice(0, end));
   }
 
-  // --- Network & Catalog ---
+  // --- Network & Caches ---
   var cachedCatalog = { ts: 0, base: BASE_URLS[0], shows: [] };
+  var tmdbCache = {};
 
   function fetchTimeout(url, options, ms) {
     var timeoutMs = ms || 5000;
@@ -224,6 +226,16 @@
           reject(err);
         });
     });
+  }
+
+  function fetchJsonSafe(url, ms) {
+    return fetchTimeout(url, {}, ms || 4000)
+      .then(function (r) {
+        return r && r.ok ? r.json() : null;
+      })
+      .catch(function () {
+        return null;
+      });
   }
 
   function decryptPayload(raw) {
@@ -304,76 +316,137 @@
     );
   }
 
-  function scoreArabicDubMatch(item, queryTitles) {
-    var score = 0;
+  function scoreShowMatch(item, queryTitles, mediaType) {
     var normName = normalizeText(item && item.name);
     var normPref = normalizeText(item && item.pref);
-    var normTags = normalizeText(item && item.tags);
-    var combined = [normName, normPref, normTags].join(" ");
+    if (!normName) return 0;
 
-    var titleMatched = false;
+    var isMovieItem =
+      Number(item && item.is_movie) === 1 ||
+      normalizeText(item && item.planet_name) === "افلام";
+
+    var bestTitleScore = 0;
+
     for (var i = 0; i < queryTitles.length; i++) {
       var q = normalizeText(queryTitles[i]);
-      if (!q) continue;
+      if (!q || q.length < 2) continue;
+
       if (normName === q) {
-        score += 120;
-        titleMatched = true;
+        bestTitleScore = Math.max(bestTitleScore, 200);
       } else if (normName.indexOf(q) !== -1) {
-        score += 75;
-        titleMatched = true;
+        var lenDiff = Math.abs(normName.length - q.length);
+        bestTitleScore = Math.max(bestTitleScore, 145 - Math.min(lenDiff, 60));
       } else {
-        var tokens = q.split(" ").filter(function (t) { return t.length > 1; });
-        var hits = 0;
-        for (var k = 0; k < tokens.length; k++) {
-          if (combined.indexOf(tokens[k]) !== -1) hits++;
-        }
-        if (hits > 0) {
-          score += hits * 18;
-          if (hits >= Math.ceil(tokens.length / 2)) titleMatched = true;
+        var tokens = q.split(" ").filter(function (t) { return t.length >= 2; });
+        if (tokens.length > 0) {
+          var nameHits = 0;
+          for (var k = 0; k < tokens.length; k++) {
+            if (normName.indexOf(tokens[k]) !== -1) nameHits++;
+          }
+          if (nameHits === tokens.length) {
+            bestTitleScore = Math.max(bestTitleScore, 115);
+          } else if (tokens.length >= 2 && nameHits >= tokens.length - 1) {
+            bestTitleScore = Math.max(bestTitleScore, 90);
+          }
         }
       }
     }
 
-    if (!titleMatched) return 0;
-    if (combined.indexOf("عربي") !== -1 || combined.indexOf("مدبلج") !== -1) score += 20;
-    if (normName.indexOf("مدبلج") !== -1 || normPref.indexOf("مدبلج") !== -1) score += 15;
-    return score;
+    if (bestTitleScore === 0) return 0;
+
+    if (mediaType === "movie" && !isMovieItem) bestTitleScore -= 15;
+    if (mediaType === "tv" && isMovieItem) bestTitleScore -= 15;
+
+    if (normName.indexOf("مدبلج") !== -1 || normPref.indexOf("مدبلج") !== -1) {
+      bestTitleScore += 15;
+    }
+
+    return bestTitleScore;
+  }
+
+  function pushUniqueTitle(list, val) {
+    var clean = String(val || "").trim();
+    if (clean && list.indexOf(clean) === -1) {
+      list.push(clean);
+    }
+  }
+
+  async function fetchTmdbDetailsAndTranslations(type, id) {
+    var base = "https://api.themoviedb.org/3/" + type + "/" + id;
+    var results = await Promise.all([
+      fetchJsonSafe(base + "?api_key=" + TMDB_API_KEY + "&language=ar-SA", 3500),
+      fetchJsonSafe(base + "?api_key=" + TMDB_API_KEY + "&language=en-US", 3500),
+      fetchJsonSafe(base + "/alternative_titles?api_key=" + TMDB_API_KEY, 3500),
+      fetchJsonSafe(base + "/translations?api_key=" + TMDB_API_KEY, 3500)
+    ]);
+
+    var titles = [];
+    var arData = results[0] || {};
+    var enData = results[1] || {};
+    var altData = results[2] || {};
+    var trData = results[3] || {};
+
+    pushUniqueTitle(titles, arData.title);
+    pushUniqueTitle(titles, arData.name);
+    pushUniqueTitle(titles, enData.title);
+    pushUniqueTitle(titles, enData.original_title);
+    pushUniqueTitle(titles, enData.name);
+    pushUniqueTitle(titles, enData.original_name);
+
+    var altList = altData.titles || altData.results || [];
+    for (var a = 0; a < altList.length; a++) {
+      pushUniqueTitle(titles, altList[a] && altList[a].title);
+      pushUniqueTitle(titles, altList[a] && altList[a].name);
+    }
+
+    var trList = trData.translations || [];
+    for (var t = 0; t < trList.length; t++) {
+      var d = trList[t] && trList[t].data;
+      if (d) {
+        pushUniqueTitle(titles, d.title);
+        pushUniqueTitle(titles, d.name);
+      }
+    }
+
+    return titles;
   }
 
   async function resolveTmdbMeta(tmdbId, mediaType) {
-    if (!tmdbId || isNaN(Number(tmdbId))) {
-      return { titles: [String(tmdbId || "")], year: null };
-    }
-    var type = mediaType === "movie" ? "movie" : "tv";
-    var apiKey = "439c478a771f35c05022f9feabcca01c";
+    var cacheKey = String(mediaType || "tv") + ":" + String(tmdbId || "");
+    if (tmdbCache[cacheKey]) return tmdbCache[cacheKey];
 
-    try {
-      var results = await Promise.all([
-        fetchTimeout("https://api.themoviedb.org/3/" + type + "/" + tmdbId + "?api_key=" + apiKey + "&language=ar-SA", {}, 4000)
-          .then(function (r) { return r && r.ok ? r.json() : {}; })
-          .catch(function () { return {}; }),
-        fetchTimeout("https://api.themoviedb.org/3/" + type + "/" + tmdbId + "?api_key=" + apiKey + "&language=en-US", {}, 4000)
-          .then(function (r) { return r && r.ok ? r.json() : {}; })
-          .catch(function () { return {}; })
-      ]);
-      var arData = results[0] || {};
-      var enData = results[1] || {};
-      var rawTitles = [
-        arData.title,
-        arData.name,
-        enData.title,
-        enData.original_title,
-        enData.name,
-        enData.original_name
-      ].filter(Boolean);
-      var uniqueTitles = [];
-      for (var i = 0; i < rawTitles.length; i++) {
-        if (uniqueTitles.indexOf(rawTitles[i]) === -1) uniqueTitles.push(rawTitles[i]);
-      }
-      return { titles: uniqueTitles, year: null };
-    } catch (e) {
-      return { titles: [], year: null };
+    if (!tmdbId || isNaN(Number(tmdbId))) {
+      var directRes = { titles: [String(tmdbId || "")], year: null };
+      tmdbCache[cacheKey] = directRes;
+      return directRes;
     }
+
+    var type = mediaType === "movie" ? "movie" : "tv";
+    var titles = await fetchTmdbDetailsAndTranslations(type, tmdbId);
+
+    // إذا لم تطابق العناوين أي عمل في الكتالوج، نبحث في TMDB بأول عنوان متاح لجلب الاسم العربي للأصل/المسلسل
+    if (titles.length > 0) {
+      var seedQuery = encodeURIComponent(titles[titles.length - 1] || titles[0]);
+      var searchRes = await fetchJsonSafe(
+        "https://api.themoviedb.org/3/search/" + type + "?api_key=" + TMDB_API_KEY + "&query=" + seedQuery + "&language=ar-SA",
+        3500
+      );
+      var firstHit = searchRes && Array.isArray(searchRes.results) && searchRes.results[0];
+      if (firstHit && firstHit.id && String(firstHit.id) !== String(tmdbId)) {
+        pushUniqueTitle(titles, firstHit.title);
+        pushUniqueTitle(titles, firstHit.name);
+        pushUniqueTitle(titles, firstHit.original_title);
+        pushUniqueTitle(titles, firstHit.original_name);
+        var extraTitles = await fetchTmdbDetailsAndTranslations(type, firstHit.id);
+        for (var e = 0; e < extraTitles.length; e++) {
+          pushUniqueTitle(titles, extraTitles[e]);
+        }
+      }
+    }
+
+    var resolved = { titles: titles, year: null };
+    tmdbCache[cacheKey] = resolved;
+    return resolved;
   }
 
   async function probeStreamUrl(url) {
@@ -475,7 +548,8 @@
 
   async function getStreams(tmdbId, mediaType, season, episode) {
     try {
-      var meta = await resolveTmdbMeta(tmdbId, mediaType || "tv");
+      var kind = mediaType === "movie" ? "movie" : "tv";
+      var meta = await resolveTmdbMeta(tmdbId, kind);
       var queryTitles = meta.titles.length ? meta.titles : [String(tmdbId || "")];
       if (!queryTitles.length || !queryTitles[0]) return [];
 
@@ -488,12 +562,18 @@
       for (var i = 0; i < shows.length; i++) {
         var s = shows[i];
         if (isExcludedSubbedOrNonArabicDub(s)) continue;
-        var sc = scoreArabicDubMatch(s, queryTitles);
-        if (sc >= 30) scored.push({ show: s, score: sc });
+        var sc = scoreShowMatch(s, queryTitles, kind);
+        if (sc >= 85) scored.push({ show: s, score: sc });
       }
       scored.sort(function (a, b) { return b.score - a.score; });
 
-      var topCandidates = scored.slice(0, 2);
+      if (!scored.length) return [];
+
+      var topScore = scored[0].score;
+      var topCandidates = scored.filter(function (entry) {
+        return topScore - entry.score <= 15;
+      }).slice(0, 1);
+
       var allStreams = [];
 
       for (var t = 0; t < topCandidates.length; t++) {
@@ -504,7 +584,7 @@
         );
         if (!Array.isArray(episodes) || !episodes.length) continue;
 
-        var targetEpNumber = mediaType === "movie" ? 1 : Number(episode || 1);
+        var targetEpNumber = kind === "movie" ? 1 : Number(episode || 1);
         var matchedEp = null;
         for (var e = 0; e < episodes.length; e++) {
           if (Number(episodes[e].number) === targetEpNumber) {
@@ -512,7 +592,9 @@
             break;
           }
         }
-        if (!matchedEp) matchedEp = episodes[0];
+        if (!matchedEp && kind === "movie") {
+          matchedEp = episodes[0];
+        }
         if (!matchedEp || !matchedEp.id) continue;
 
         var detail =
