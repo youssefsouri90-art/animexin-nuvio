@@ -293,6 +293,12 @@
     return out;
   }
 
+  function extractAttr(line, attrName) {
+    var re = new RegExp(attrName + '=\\"([^\\"]*)\\"', "i");
+    var m = String(line || "").match(re);
+    return m && m[1] ? m[1].trim() : "";
+  }
+
   function resolvePlaylistUri(baseUrl, uri) {
     var u = String(uri || "").trim();
     if (!u) return "";
@@ -312,10 +318,14 @@
     }
   }
 
-  function formatQualityLabel(resStr, bwStr) {
+  function parseHeight(resStr) {
     var m = String(resStr || "").match(/(\d+)x(\d+)/i);
-    if (m) {
-      var h = parseInt(m[2], 10);
+    return m ? parseInt(m[2], 10) : 0;
+  }
+
+  function formatQualityLabel(resStr, bwStr) {
+    var h = parseHeight(resStr);
+    if (h > 0) {
       if (h >= 2160) return "4K (" + resStr + ")";
       if (h >= 1080) return "1080p (" + resStr + ")";
       if (h >= 720) return "720p (" + resStr + ")";
@@ -327,30 +337,64 @@
     return "Auto";
   }
 
-  async function expandM3u8Variants(masterUrl, headers, titleLabel, subtitles) {
+  async function expandM3u8Variants(masterUrl, headers, titleLabel, baseSubtitles) {
+    var subtitles = Array.isArray(baseSubtitles) ? baseSubtitles.slice() : [];
+    var audioTracks = [];
+
     var baseStream = {
       name: "Netflix (NetMirror)",
       title: titleLabel,
       url: masterUrl,
       quality: "Auto",
       headers: headers,
-      subtitles: subtitles
+      subtitles: subtitles,
+      audioTracks: audioTracks
     };
 
     try {
       var res = await withTimeout(fetch(masterUrl, { headers: headers }), 3000);
       if (!res || !res.ok) return [baseStream];
       var text = await withTimeout(res.text(), 3000);
-      if (!text || text.indexOf("#EXT-X-STREAM-INF") === -1) return [baseStream];
+      if (!text) return [baseStream];
 
       var lines = text.split(/\r?\n/);
       var variants = [];
+
       for (var i = 0; i < lines.length; i++) {
         var line = lines[i].trim();
+
+        if (line.indexOf("#EXT-X-MEDIA:") === 0) {
+          var mediaType = extractAttr(line, "TYPE").toUpperCase();
+          var mediaName = extractAttr(line, "NAME") || extractAttr(line, "LANGUAGE") || "Track";
+          var mediaLang = extractAttr(line, "LANGUAGE") || mediaName;
+          var mediaUri = resolvePlaylistUri(masterUrl, extractAttr(line, "URI"));
+
+          if (mediaType === "SUBTITLES" && mediaUri) {
+            var existsSub = subtitles.some(function (s) { return s.url === mediaUri; });
+            if (!existsSub) {
+              subtitles.push({
+                url: mediaUri,
+                language: mediaLang,
+                name: mediaName
+              });
+            }
+          } else if (mediaType === "AUDIO") {
+            audioTracks.push({
+              name: mediaName,
+              language: mediaLang,
+              url: mediaUri || masterUrl
+            });
+          }
+          continue;
+        }
+
         if (line.indexOf("#EXT-X-STREAM-INF:") === 0) {
           var resMatch = line.match(/RESOLUTION=([^\s,]+)/i);
           var bwMatch = line.match(/BANDWIDTH=(\d+)/i);
+          var resVal = resMatch ? resMatch[1] : "";
+          var bwVal = bwMatch ? bwMatch[1] : "";
           var nextUri = "";
+
           for (var j = i + 1; j < lines.length; j++) {
             var cand = lines[j].trim();
             if (cand && cand.charAt(0) !== "#") {
@@ -359,23 +403,44 @@
               break;
             }
           }
+
           var resolvedUrl = resolvePlaylistUri(masterUrl, nextUri);
           if (resolvedUrl && /^https?:\/\//i.test(resolvedUrl)) {
             variants.push({
               name: "Netflix (NetMirror)",
               title: titleLabel,
               url: resolvedUrl,
-              quality: formatQualityLabel(resMatch ? resMatch[1] : "", bwMatch ? bwMatch[1] : ""),
+              quality: formatQualityLabel(resVal, bwVal),
+              _height: parseHeight(resVal),
               headers: headers,
-              subtitles: subtitles
+              subtitles: subtitles,
+              audioTracks: audioTracks
             });
           }
         }
       }
 
-      if (variants.length > 0) {
-        variants.unshift(baseStream);
-        return variants;
+      variants.sort(function (a, b) {
+        return (b._height || 0) - (a._height || 0);
+      });
+
+      var cleanVariants = variants.map(function (v) {
+        return {
+          name: v.name,
+          title: v.title,
+          url: v.url,
+          quality: v.quality,
+          headers: v.headers,
+          subtitles: v.subtitles,
+          audioTracks: v.audioTracks
+        };
+      });
+
+      baseStream.subtitles = subtitles;
+      baseStream.audioTracks = audioTracks;
+
+      if (cleanVariants.length > 0) {
+        return [baseStream].concat(cleanVariants);
       }
     } catch (_) {}
 
