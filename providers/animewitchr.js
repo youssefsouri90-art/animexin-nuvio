@@ -12,7 +12,7 @@ const UA = {
     "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
 };
 
-function normTitle(s) {
+function normAscii(s) {
   return String(s || "")
     .toLowerCase()
     .replace(/['’]/g, "")
@@ -20,35 +20,53 @@ function normTitle(s) {
     .trim();
 }
 
-function similarity(a, b) {
-  const na = normTitle(a);
-  const nb = normTitle(b);
+function tokenSimilarity(a, b) {
+  const na = normAscii(a);
+  const nb = normAscii(b);
   if (!na || !nb) return 0;
   if (na === nb) return 1;
-  const A = new Set(na.split(" "));
-  const B = new Set(nb.split(" "));
-  let hit = 0;
-  A.forEach(function (w) {
-    if (w && B.has(w)) hit++;
+
+  const wa = na.split(" ").filter(Boolean);
+  const wb = nb.split(" ").filter(Boolean);
+  const setA = new Set(wa);
+  const setB = new Set(wb);
+
+  let common = 0;
+  setA.forEach(function (w) {
+    if (setB.has(w)) common++;
   });
-  return hit / Math.max(A.size, B.size, 1);
+
+  const jaccard = common / Math.max(setA.size, setB.size, 1);
+  // جزاء بسيط إذا كان المرشح أطول بكثير بكلمات إضافية مثل shippuuden أو movie أو next generations
+  const extraPenalty = Math.max(0, setB.size - setA.size) * 0.12;
+  return Math.max(0, jaccard - extraPenalty);
 }
 
 const ROMAN = { 2: "ii", 3: "iii", 4: "iv", 5: "v", 6: "vi" };
 
-function seasonBoost(names, season) {
+function seasonScoreAdjustment(names, season) {
   const s = Number(season) || 1;
-  if (s <= 1) return 0;
+  const joined = " " + names.map(normAscii).join(" | ") + " ";
+
+  const hasShippuuden = joined.indexOf(" shippuuden ") >= 0 || joined.indexOf(" shippuden ") >= 0;
+  const hasSeason2Plus =
+    joined.indexOf(" season 2 ") >= 0 ||
+    joined.indexOf(" 2nd season ") >= 0 ||
+    joined.indexOf(" ii ") >= 0;
+
+  if (s <= 1) {
+    if (hasShippuuden || hasSeason2Plus) return -0.35;
+    return 0.15;
+  }
+
   const ord = s + (s === 2 ? "nd" : s === 3 ? "rd" : "th");
-  for (let i = 0; i < names.length; i++) {
-    const t = " " + normTitle(names[i]) + " ";
-    if (
-      t.indexOf(" season " + s + " ") >= 0 ||
-      t.indexOf(" " + ord + " season ") >= 0 ||
-      (ROMAN[s] && t.indexOf(" " + ROMAN[s] + " ") >= 0)
-    ) {
-      return 0.25;
-    }
+  if (
+    joined.indexOf(" season " + s + " ") >= 0 ||
+    joined.indexOf(" " + ord + " season ") >= 0 ||
+    (ROMAN[s] && joined.indexOf(" " + ROMAN[s] + " ") >= 0) ||
+    (s === 2 && hasShippuuden)
+  ) {
+    return 0.35;
   }
   return 0;
 }
@@ -97,9 +115,9 @@ function parseFirestoreDoc(doc) {
 
 async function getTmdbTitles(id, mediaType) {
   const raw = String(id || "").trim();
-  if (!/^\d+$/.test(raw)) {
-    return [raw].filter(Boolean);
-  }
+  if (!raw) return [];
+  if (!/^\d+$/.test(raw)) return [raw];
+
   const type = mediaType === "movie" ? "movie" : "tv";
   try {
     const res = await fetch(
@@ -117,6 +135,7 @@ async function getTmdbTitles(id, mediaType) {
       j.name || j.title,
       j.original_name || j.original_title,
     ].filter(Boolean);
+
     const alt =
       (j.alternative_titles &&
         (j.alternative_titles.results || j.alternative_titles.titles)) ||
@@ -126,9 +145,10 @@ async function getTmdbTitles(id, mediaType) {
         titles.push(a.title);
       }
     });
+
     const seen = {};
     return titles.filter(function (t) {
-      const k = normTitle(t);
+      const k = normAscii(t) || String(t).trim().toLowerCase();
       if (!k || seen[k]) return false;
       seen[k] = true;
       return true;
@@ -145,7 +165,7 @@ async function queryAlgoliaSeries(query) {
     "-dsn.algolia.net/1/indexes/series/query";
   const params = new URLSearchParams({
     query: String(query || ""),
-    hitsPerPage: "8",
+    hitsPerPage: "10",
   }).toString();
 
   const res = await fetch(url, {
@@ -163,13 +183,21 @@ async function queryAlgoliaSeries(query) {
   return (json && json.hits) || [];
 }
 
-function hitNames(hit) {
+function extractAnimeId(hit) {
+  if (!hit || typeof hit !== "object") return "";
+  if (hit.path && typeof hit.path === "string") {
+    const parts = hit.path.split("/").filter(Boolean);
+    if (parts.length >= 2) return parts[parts.length - 1];
+  }
+  return hit.objectID ? String(hit.objectID) : "";
+}
+
+function collectHitNames(hit) {
   const names = [];
   if (!hit || typeof hit !== "object") return names;
-  if (hit.path) {
-    const parts = String(hit.path).split("/").filter(Boolean);
-    if (parts.length) names.push(parts[parts.length - 1]);
-  }
+  const id = extractAnimeId(hit);
+  if (id) names.push(id);
+  if (hit.objectID) names.push(String(hit.objectID));
   if (Array.isArray(hit.search_names)) {
     hit.search_names.forEach(function (n) {
       if (n) names.push(n);
@@ -186,15 +214,6 @@ function hitNames(hit) {
   return names;
 }
 
-function extractAnimeId(hit) {
-  if (!hit || typeof hit !== "object") return "";
-  if (hit.path && typeof hit.path === "string") {
-    const parts = hit.path.split("/").filter(Boolean);
-    if (parts.length >= 2) return parts[parts.length - 1];
-  }
-  return hit.objectID ? String(hit.objectID) : "";
-}
-
 async function resolveMatchedAnimeId(id, mediaType, season) {
   const raw = String(id || "").trim();
   if (!raw) return null;
@@ -205,22 +224,16 @@ async function resolveMatchedAnimeId(id, mediaType, season) {
   const titles = await getTmdbTitles(raw, mediaType);
   if (!titles.length) return null;
 
-  const queries = [];
-  titles.forEach(function (t) {
-    if (mediaType !== "movie" && Number(season) > 1) {
-      queries.push(t + " season " + Number(season));
-    }
-    queries.push(t);
-  });
-
+  const queries = titles.slice(0, 3);
   const pool = {};
-  for (let i = 0; i < queries.length && i < 4; i++) {
+
+  for (let i = 0; i < queries.length; i++) {
     const hits = await queryAlgoliaSeries(queries[i]);
     hits.forEach(function (h) {
       const aid = extractAnimeId(h);
       if (!aid) return;
       if (!pool[aid]) pool[aid] = { id: aid, names: [] };
-      pool[aid].names = pool[aid].names.concat(hitNames(h));
+      pool[aid].names = pool[aid].names.concat(collectHitNames(h));
     });
   }
 
@@ -230,19 +243,18 @@ async function resolveMatchedAnimeId(id, mediaType, season) {
     let score = 0;
     titles.forEach(function (t) {
       cand.names.forEach(function (nm) {
-        score = Math.max(score, similarity(t, nm));
+        score = Math.max(score, tokenSimilarity(t, nm));
       });
     });
     if (mediaType !== "movie") {
-      score += seasonBoost(cand.names, season);
+      score += seasonScoreAdjustment(cand.names, season);
     }
     if (!best || score > best.score) {
       best = { id: aid, score: score };
     }
   });
 
-  // منع المطابقة الخاطئة العشوائية عند انخفاض التشابه
-  if (!best || best.score < 0.5) return null;
+  if (!best || best.score < 0.35) return null;
   return best.id;
 }
 
