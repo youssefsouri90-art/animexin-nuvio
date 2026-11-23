@@ -12,10 +12,6 @@ const UA = {
 
 const SLUG_ALIASES = {
   "the-apothecary-diaries": ["kusuriya-no-hitorigoto", "the-apothecary-diaries"],
-  "frieren-beyond-journeys-end": [
-    "sousou-no-frieren",
-    "frieren-beyond-journeys-end",
-  ],
 };
 
 function toSlug(s) {
@@ -51,13 +47,11 @@ function extractSnapshots(html) {
 }
 
 function extractVideoSources(playerHtml) {
-  const unescaped = String(playerHtml || "").replace(/\\\//g, "/");
+  const unescaped = String(playerHtml).replace(/\\\//g, "/");
   const results = [];
   const seenUrls = new Set();
 
-  const objMatches = [
-    ...unescaped.matchAll(/\{[^{}]*"src"\s*:\s*"[^"]*"[^{}]*\}/g),
-  ];
+  const objMatches = [...unescaped.matchAll(/\{[^{}]*"src"\s*:\s*"[^"]*"[^{}]*\}/g)];
   for (const om of objMatches) {
     const objStr = om[0];
     const srcMatch = /"src"\s*:\s*"([^"]+)"/.exec(objStr);
@@ -105,13 +99,10 @@ function extractVideoSources(playerHtml) {
 }
 
 async function getKitsuTitles(kitsuId) {
-  const cleanId = String(kitsuId || "").replace(/^kitsu[:_-]?/i, "").trim();
-  if (!/^\d+$/.test(cleanId)) return [];
   try {
-    const r = await fetch(`https://kitsu.io/api/edge/anime/${cleanId}`, {
+    const r = await fetch(`https://kitsu.io/api/edge/anime/${kitsuId}`, {
       headers: { Accept: "application/vnd.api+json" },
     });
-    if (!r.ok) return [];
     const j = await r.json();
     const a = (j && j.data && j.data.attributes) || {};
     const t = a.titles || {};
@@ -123,44 +114,13 @@ async function getKitsuTitles(kitsuId) {
   }
 }
 
-async function getMalTitlesViaAniList(malId) {
-  const cleanId = String(malId || "").replace(/^mal[:_-]?/i, "").trim();
-  if (!/^\d+$/.test(cleanId)) return [];
-  try {
-    const r = await fetch("https://graphql.anilist.co", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        query:
-          "query ($idMal: Int) { Media(idMal: $idMal, type: ANIME) { title { romaji english native } synonyms } }",
-        variables: { idMal: Number(cleanId) },
-      }),
-    });
-    if (!r.ok) return [];
-    const j = await r.json();
-    const media = j && j.data && j.data.Media;
-    if (!media) return [];
-    const t = media.title || {};
-    return [t.english, t.romaji, t.native]
-      .concat(media.synonyms || [])
-      .filter(Boolean);
-  } catch (_) {
-    return [];
-  }
-}
-
 async function getTmdbTitles(tmdbId, mediaType) {
   try {
-    const cleanId = String(tmdbId || "").replace(/^(tmdb[:_-]?|tt)/i, "").trim();
-    if (!/^\d+$/.test(cleanId)) return [];
+    const cleanId = String(tmdbId).replace(/^tt/i, "");
     const type = mediaType === "movie" ? "movie" : "tv";
     const r = await fetch(
       `https://api.themoviedb.org/3/${type}/${cleanId}?api_key=${TMDB_KEY}&append_to_response=alternative_titles`
     );
-    if (!r.ok) return [];
     const j = await r.json();
     const out = [j.name || j.title, j.original_name || j.original_title];
     const alt =
@@ -178,25 +138,19 @@ async function getTmdbTitles(tmdbId, mediaType) {
 
 async function resolveTitles(id, type) {
   const rawId = String(id || "").trim();
-  if (!rawId) return [];
-
-  if (/^kitsu[:_-]?/i.test(rawId)) {
-    return await getKitsuTitles(rawId);
+  if (/^kitsu:/i.test(rawId)) {
+    return getKitsuTitles(rawId.split(":")[1]);
   }
-  if (/^mal[:_-]?/i.test(rawId)) {
-    return await getMalTitlesViaAniList(rawId);
-  }
-  if (/^tmdb[:_-]?/i.test(rawId) || /^\d+$/.test(rawId) || /^tt\d+$/i.test(rawId)) {
+  if (/^\d+$/.test(rawId) || /^tt\d+$/i.test(rawId)) {
     const tmdbTitles = await getTmdbTitles(rawId, type);
     if (tmdbTitles.length) return tmdbTitles;
   }
-
   return [rawId.replace(/[-_]+/g, " ")].filter(Boolean);
 }
 
 async function resolveValidSlug(titles) {
   const expanded = [];
-  for (const title of titles.slice(0, 6)) {
+  for (const title of titles.slice(0, 5)) {
     const baseSlug = toSlug(title);
     if (!baseSlug) continue;
     const list = SLUG_ALIASES[baseSlug] || [baseSlug];
@@ -218,15 +172,12 @@ async function resolveValidSlug(titles) {
       }
     } catch (_) {}
   }
-  return "";
+  return expanded[0] || "";
 }
 
 async function getStreams(id, type, season, episode) {
   try {
-    const epNum =
-      type === "movie"
-        ? "1"
-        : String(Number(episode) > 0 ? Number(episode) : 1);
+    const epNum = String(episode || season || "1");
     const titles = await resolveTitles(id, type);
     if (!titles.length) return [];
 
