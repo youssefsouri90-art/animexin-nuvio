@@ -1,14 +1,57 @@
 const FIREBASE_PROJECT_ID = "animewitcher-1c66d";
 const FIREBASE_API_KEY = "AIzaSyAcbWRwfFNnCpoydDXlEALWnM_TYVcJOMU";
+const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
 
 const DEFAULT_ALGOLIA = {
   appId: "TVNESH8OZY",
   apiKey: "54098ae17637c217f486e6165c8a913c",
 };
 
-const DEFAULT_HEADERS = {
-  "User-Agent": "Mozilla/5.0",
+const UA = {
+  "User-Agent":
+    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
 };
+
+function normTitle(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/['’]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function similarity(a, b) {
+  const na = normTitle(a);
+  const nb = normTitle(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+  const A = new Set(na.split(" "));
+  const B = new Set(nb.split(" "));
+  let hit = 0;
+  A.forEach(function (w) {
+    if (w && B.has(w)) hit++;
+  });
+  return hit / Math.max(A.size, B.size, 1);
+}
+
+const ROMAN = { 2: "ii", 3: "iii", 4: "iv", 5: "v", 6: "vi" };
+
+function seasonBoost(names, season) {
+  const s = Number(season) || 1;
+  if (s <= 1) return 0;
+  const ord = s + (s === 2 ? "nd" : s === 3 ? "rd" : "th");
+  for (let i = 0; i < names.length; i++) {
+    const t = " " + normTitle(names[i]) + " ";
+    if (
+      t.indexOf(" season " + s + " ") >= 0 ||
+      t.indexOf(" " + ord + " season ") >= 0 ||
+      (ROMAN[s] && t.indexOf(" " + ROMAN[s] + " ") >= 0)
+    ) {
+      return 0.25;
+    }
+  }
+  return 0;
+}
 
 function firestoreDocUrl(docPath) {
   return (
@@ -52,54 +95,95 @@ function parseFirestoreDoc(doc) {
   return out;
 }
 
-function getAlgoliaConfig() {
-  return fetch(firestoreDocUrl("Settings/constants"))
-    .then(function (res) {
-      if (!res.ok) return DEFAULT_ALGOLIA;
-      return res.json().then(function (json) {
-        const data = parseFirestoreDoc(json);
-        const searchSettings = data.search_settings || {};
-        return {
-          appId: searchSettings.app_id || DEFAULT_ALGOLIA.appId,
-          apiKey:
-            searchSettings.api_key ||
-            searchSettings.browse_api_key ||
-            DEFAULT_ALGOLIA.apiKey,
-        };
-      });
-    })
-    .catch(function () {
-      return DEFAULT_ALGOLIA;
+async function getTmdbTitles(id, mediaType) {
+  const raw = String(id || "").trim();
+  if (!/^\d+$/.test(raw)) {
+    return [raw].filter(Boolean);
+  }
+  const type = mediaType === "movie" ? "movie" : "tv";
+  try {
+    const res = await fetch(
+      "https://api.themoviedb.org/3/" +
+        type +
+        "/" +
+        raw +
+        "?api_key=" +
+        TMDB_KEY +
+        "&append_to_response=alternative_titles"
+    );
+    if (!res.ok) return [];
+    const j = await res.json();
+    const titles = [
+      j.name || j.title,
+      j.original_name || j.original_title,
+    ].filter(Boolean);
+    const alt =
+      (j.alternative_titles &&
+        (j.alternative_titles.results || j.alternative_titles.titles)) ||
+      [];
+    alt.forEach(function (a) {
+      if (a && a.title && /^(US|GB|JP)$/.test(a.iso_3166_1 || "")) {
+        titles.push(a.title);
+      }
     });
+    const seen = {};
+    return titles.filter(function (t) {
+      const k = normTitle(t);
+      if (!k || seen[k]) return false;
+      seen[k] = true;
+      return true;
+    });
+  } catch (e) {
+    return [];
+  }
 }
 
-function queryAlgolia(index, paramsObj) {
-  const params = new URLSearchParams(paramsObj || {}).toString();
-  return getAlgoliaConfig().then(function (cfg) {
-    const url =
-      "https://" +
-      cfg.appId +
-      "-dsn.algolia.net/1/indexes/" +
-      encodeURIComponent(index) +
-      "/query";
-    return fetch(url, {
-      method: "POST",
-      headers: {
-        "X-Algolia-Application-Id": cfg.appId,
-        "X-Algolia-API-Key": cfg.apiKey,
-        "Content-Type": "application/json; charset=UTF-8",
-        "User-Agent": DEFAULT_HEADERS["User-Agent"],
-      },
-      body: JSON.stringify({ params: params }),
-    }).then(function (res) {
-      if (!res.ok) {
-        throw new Error("Algolia query failed (" + index + "): " + res.status);
-      }
-      return res.json().then(function (json) {
-        return (json && json.hits) || [];
-      });
-    });
+async function queryAlgoliaSeries(query) {
+  const url =
+    "https://" +
+    DEFAULT_ALGOLIA.appId +
+    "-dsn.algolia.net/1/indexes/series/query";
+  const params = new URLSearchParams({
+    query: String(query || ""),
+    hitsPerPage: "8",
+  }).toString();
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "X-Algolia-Application-Id": DEFAULT_ALGOLIA.appId,
+      "X-Algolia-API-Key": DEFAULT_ALGOLIA.apiKey,
+      "Content-Type": "application/json; charset=UTF-8",
+      "User-Agent": UA["User-Agent"],
+    },
+    body: JSON.stringify({ params: params }),
   });
+  if (!res.ok) return [];
+  const json = await res.json();
+  return (json && json.hits) || [];
+}
+
+function hitNames(hit) {
+  const names = [];
+  if (!hit || typeof hit !== "object") return names;
+  if (hit.path) {
+    const parts = String(hit.path).split("/").filter(Boolean);
+    if (parts.length) names.push(parts[parts.length - 1]);
+  }
+  if (Array.isArray(hit.search_names)) {
+    hit.search_names.forEach(function (n) {
+      if (n) names.push(n);
+    });
+  }
+  if (hit.alternative_titles && typeof hit.alternative_titles === "object") {
+    Object.keys(hit.alternative_titles).forEach(function (k) {
+      if (hit.alternative_titles[k]) names.push(hit.alternative_titles[k]);
+    });
+  }
+  if (hit.details && hit.details.english_title) {
+    names.push(hit.details.english_title);
+  }
+  return names;
 }
 
 function extractAnimeId(hit) {
@@ -111,31 +195,55 @@ function extractAnimeId(hit) {
   return hit.objectID ? String(hit.objectID) : "";
 }
 
-function resolveAnimeId(queryOrId) {
-  const raw = String(queryOrId || "").trim();
-  if (!raw) return Promise.resolve("");
+async function resolveMatchedAnimeId(id, mediaType, season) {
+  const raw = String(id || "").trim();
+  if (!raw) return null;
   if (raw.indexOf("anime_list/") === 0) {
-    return Promise.resolve(raw.replace(/^anime_list\//, ""));
+    return raw.replace(/^anime_list\//, "");
   }
-  return queryAlgolia("series", {
-    query: raw,
-    hitsPerPage: "5",
-  }).then(function (hits) {
-    if (!hits || !hits.length) return raw;
-    const exact = hits.find(function (h) {
-      const id = extractAnimeId(h);
-      const enTitle =
-        (h.alternative_titles && h.alternative_titles.en) ||
-        (h.details && h.details.english_title) ||
-        "";
-      return (
-        id.toLowerCase() === raw.toLowerCase() ||
-        String(h.mal_id || "") === raw ||
-        enTitle.toLowerCase() === raw.toLowerCase()
-      );
-    });
-    return extractAnimeId(exact || hits[0]) || raw;
+
+  const titles = await getTmdbTitles(raw, mediaType);
+  if (!titles.length) return null;
+
+  const queries = [];
+  titles.forEach(function (t) {
+    if (mediaType !== "movie" && Number(season) > 1) {
+      queries.push(t + " season " + Number(season));
+    }
+    queries.push(t);
   });
+
+  const pool = {};
+  for (let i = 0; i < queries.length && i < 4; i++) {
+    const hits = await queryAlgoliaSeries(queries[i]);
+    hits.forEach(function (h) {
+      const aid = extractAnimeId(h);
+      if (!aid) return;
+      if (!pool[aid]) pool[aid] = { id: aid, names: [] };
+      pool[aid].names = pool[aid].names.concat(hitNames(h));
+    });
+  }
+
+  let best = null;
+  Object.keys(pool).forEach(function (aid) {
+    const cand = pool[aid];
+    let score = 0;
+    titles.forEach(function (t) {
+      cand.names.forEach(function (nm) {
+        score = Math.max(score, similarity(t, nm));
+      });
+    });
+    if (mediaType !== "movie") {
+      score += seasonBoost(cand.names, season);
+    }
+    if (!best || score > best.score) {
+      best = { id: aid, score: score };
+    }
+  });
+
+  // منع المطابقة الخاطئة العشوائية عند انخفاض التشابه
+  if (!best || best.score < 0.5) return null;
+  return best.id;
 }
 
 function pickEpisodeDocId(episodes, episodeNum) {
@@ -143,23 +251,21 @@ function pickEpisodeDocId(episodes, episodeNum) {
   const target = Number(episodeNum) || 1;
   const padded = String(target).padStart(3, "0");
 
-  const byDocId = episodes.find(function (ep) {
-    return (
-      String(ep && ep.doc_id) === padded ||
-      String(ep && ep.doc_id) === String(target)
-    );
+  const exact = episodes.find(function (ep) {
+    if (!ep || !ep.doc_id) return false;
+    const d = String(ep.doc_id).trim();
+    return d === padded || d === String(target) || String(Number(d)) === String(target);
   });
-  if (byDocId && byDocId.doc_id) return String(byDocId.doc_id);
+  if (exact) return String(exact.doc_id);
 
   const byName = episodes.find(function (ep) {
-    const name = String((ep && ep.name) || "");
-    const match = name.match(/(\d+)/);
-    return match && Number(match[1]) === target;
+    if (!ep || !ep.doc_id) return false;
+    const m = String(ep.name || "").match(/(\d+)/);
+    return m && Number(m[1]) === target;
   });
-  if (byName && byName.doc_id) return String(byName.doc_id);
+  if (byName) return String(byName.doc_id);
 
-  const idx = Math.max(0, Math.min(episodes.length - 1, target - 1));
-  return episodes[idx] && episodes[idx].doc_id ? String(episodes[idx].doc_id) : null;
+  return null;
 }
 
 function resolveDirectCandidate(rawLink) {
@@ -168,136 +274,104 @@ function resolveDirectCandidate(rawLink) {
   if (!/^https?:\/\//i.test(trimmed)) return null;
 
   if (trimmed.indexOf("pixeldrain.com/u/") !== -1) {
-    const id = trimmed.split("/u/")[1].split(/[/?#]/)[0];
-    if (!id) return null;
-    return "https://pixeldrain.com/api/file/" + id;
+    const fileId = trimmed.split("/u/")[1].split(/[/?#]/)[0];
+    if (!fileId) return null;
+    return "https://pixeldrain.com/api/file/" + fileId;
   }
 
-  return trimmed;
+  return null;
 }
 
-function verifyPlayableStream(url) {
-  function checkHeaders(res) {
-    const contentType = (res.headers.get("content-type") || "").toLowerCase();
-    const isMedia =
-      contentType.indexOf("video/") !== -1 ||
-      contentType.indexOf("application/octet-stream") !== -1 ||
-      contentType.indexOf("application/vnd.apple.mpegurl") !== -1 ||
-      contentType.indexOf("application/x-mpegurl") !== -1;
-
-    if (!res.ok || !isMedia) return null;
-    return {
-      url: res.url || url,
-      mimeType: contentType,
-    };
-  }
-
-  return fetch(url, {
-    method: "HEAD",
-    headers: DEFAULT_HEADERS,
-    redirect: "follow",
-  })
-    .then(function (res) {
-      if (res.status === 405 || res.status === 403) {
-        return fetch(url, {
-          method: "GET",
-          headers: {
-            "User-Agent": DEFAULT_HEADERS["User-Agent"],
-            Range: "bytes=0-15",
-          },
-          redirect: "follow",
-        }).then(checkHeaders);
-      }
-      return checkHeaders(res);
-    })
-    .catch(function () {
-      return null;
+async function verifyPlayableStream(url) {
+  try {
+    let res = await fetch(url, {
+      method: "HEAD",
+      headers: UA,
+      redirect: "follow",
     });
+    if (res.status === 405 || res.status === 403) {
+      res = await fetch(url, {
+        method: "GET",
+        headers: {
+          "User-Agent": UA["User-Agent"],
+          Range: "bytes=0-15",
+        },
+        redirect: "follow",
+      });
+    }
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    const isMedia =
+      ct.indexOf("video/") !== -1 ||
+      ct.indexOf("application/octet-stream") !== -1;
+    if (!res.ok || !isMedia) return null;
+    return res.url || url;
+  } catch (e) {
+    return null;
+  }
 }
 
-function getStreams(id, mediaType, season, episode) {
-  const epNumber =
-    typeof season === "number" && typeof episode === "number"
-      ? episode
-      : typeof mediaType === "number"
-      ? mediaType
-      : Number(episode || season || 1) || 1;
+async function getStreams(id, mediaType, season, episode) {
+  const isMovie = mediaType === "movie";
+  const epNum = isMovie ? 1 : Number(episode || season || 1) || 1;
 
-  return resolveAnimeId(id).then(function (animeId) {
-    const cleanAnime = encodeURIComponent(String(animeId || "").trim());
-    if (!cleanAnime) return [];
+  const animeId = await resolveMatchedAnimeId(id, mediaType, season);
+  if (!animeId) return [];
 
-    return fetch(
-      firestoreDocUrl("anime_list/" + cleanAnime + "/episodes_summery/summery")
+  const cleanAnime = encodeURIComponent(animeId);
+  const epRes = await fetch(
+    firestoreDocUrl("anime_list/" + cleanAnime + "/episodes_summery/summery")
+  );
+  if (!epRes.ok) return [];
+
+  const epDoc = parseFirestoreDoc(await epRes.json());
+  const episodes = Array.isArray(epDoc.episodes) ? epDoc.episodes : [];
+  const epDocId = pickEpisodeDocId(episodes, epNum);
+  if (!epDocId) return [];
+
+  const srvRes = await fetch(
+    firestoreDocUrl(
+      "anime_list/" +
+        cleanAnime +
+        "/episodes/" +
+        encodeURIComponent(epDocId) +
+        "/servers2/all_servers"
     )
-      .then(function (res) {
-        if (!res.ok) return null;
-        return res.json().then(function (json) {
-          const doc = parseFirestoreDoc(json);
-          const episodes = Array.isArray(doc.episodes) ? doc.episodes : [];
-          return pickEpisodeDocId(episodes, epNumber);
-        });
-      })
-      .then(function (epDocId) {
-        const targetEp = encodeURIComponent(
-          epDocId || String(epNumber).padStart(3, "0")
-        );
-        return fetch(
-          firestoreDocUrl(
-            "anime_list/" +
-              cleanAnime +
-              "/episodes/" +
-              targetEp +
-              "/servers2/all_servers"
-          )
-        );
-      })
-      .then(function (res) {
-        if (!res || !res.ok) return [];
-        return res.json().then(function (json) {
-          const doc = parseFirestoreDoc(json);
-          const servers = Array.isArray(doc.servers) ? doc.servers : [];
+  );
+  if (!srvRes.ok) return [];
 
-          const candidates = servers
-            .filter(function (srv) {
-              return srv && srv.visible !== false && srv.link;
-            })
-            .map(function (srv) {
-              return {
-                name: srv.name || "Server",
-                quality: srv.quality || "Auto",
-                candidateUrl: resolveDirectCandidate(srv.link),
-              };
-            })
-            .filter(function (item) {
-              return Boolean(item.candidateUrl);
-            });
+  const srvDoc = parseFirestoreDoc(await srvRes.json());
+  const servers = Array.isArray(srvDoc.servers) ? srvDoc.servers : [];
 
-          return Promise.all(
-            candidates.map(function (item) {
-              return verifyPlayableStream(item.candidateUrl).then(
-                function (verified) {
-                  if (!verified) return null;
-                  return {
-                    name: "AnimeWitcher",
-                    title: item.name + " - " + item.quality,
-                    quality: item.quality,
-                    url: verified.url,
-                    mimeType: verified.mimeType,
-                    headers: DEFAULT_HEADERS,
-                  };
-                }
-              );
-            })
-          ).then(function (results) {
-            return results.filter(Boolean);
-          });
-        });
-      })
-      .catch(function () {
-        return [];
-      });
-  });
+  const candidates = servers
+    .filter(function (srv) {
+      return srv && srv.visible !== false && srv.link;
+    })
+    .map(function (srv) {
+      return {
+        name: srv.name || "PD",
+        quality: srv.quality || "Auto",
+        url: resolveDirectCandidate(srv.link),
+      };
+    })
+    .filter(function (c) {
+      return Boolean(c.url);
+    });
+
+  const verifiedList = await Promise.all(
+    candidates.map(async function (c) {
+      const finalUrl = await verifyPlayableStream(c.url);
+      if (!finalUrl) return null;
+      return {
+        name: "AnimeWitcher",
+        title: animeId + " - Ep " + epDocId + " (" + c.name + " " + c.quality + ")",
+        quality: c.quality,
+        url: finalUrl,
+        headers: UA,
+      };
+    })
+  );
+
+  return verifiedList.filter(Boolean);
 }
 
 module.exports = {
