@@ -3,9 +3,6 @@
 //       -> POST /api/encrypt -> GET /api/stream-encrypted -> m3u8
 // The media token lives ~120 s, so everything runs in one getStreams() call.
 // ---------- proof of work (SHA-256 hashcash, optimized for QuickJS) ----------
-// Finds nonce such that SHA256(challenge + String(nonce)) has >= difficulty leading zero bits.
-// The 64-char challenge is exactly one SHA-256 block, so its state is precomputed once and
-// each attempt costs a single (unrolled) compression.
 var SHA_K = [1116352408, 1899447441, -1245643825, -373957723, 961987163, 1508970993, -1841331548, -1424204075, -670586216, 310598401, 607225278, 1426881987, 1925078388, -2132889090, -1680079193, -1046744716, -459576895, -272742522, 264347078, 604807628, 770255983, 1249150122, 1555081692, 1996064986, -1740746414, -1473132947, -1341970488, -1084653625, -958395405, -710438585, 113926993, 338241895, 666307205, 773529912, 1294757372, 1396182291, 1695183700, 1986661051, -2117940946, -1838011259, -1564481375, -1474664885, -1035236496, -949202525, -778901479, -694614492, -200395387, 275423344, 430227734, 506948616, 659060556, 883997877, 958139571, 1322822218, 1537002063, 1747873779, 1955562222, 2024104815, -2067236844, -1933114872, -1866530822, -1538233109, -1090935817, -965641998];
 var SHA_IV = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
 var MID = [0, 0, 0, 0, 0, 0, 0, 0];
@@ -33,7 +30,7 @@ function shaCompress(state, w) {
           (state[4] + e) | 0, (state[5] + f) | 0, (state[6] + g) | 0, (state[7] + h) | 0];
 }
 
-function powBlock2(s) { // second block words for message = challenge(64 bytes) + s
+function powBlock2(s) {
   var bytes = [], i;
   for (i = 0; i < 64; i++) bytes.push(0);
   for (i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i) & 255;
@@ -44,20 +41,9 @@ function powBlock2(s) { // second block words for message = challenge(64 bytes) 
   return w;
 }
 
-// unrolled compression of block 2 (words 4..14 are zero); returns first output word
 function powFirstWord(w0, w1, w2, w3, w15) {
   var m0=MID[0],m1=MID[1],m2=MID[2],m3=MID[3],m4=MID[4],m5=MID[5],m6=MID[6],m7=MID[7];
-  var w4=0;
-  var w5=0;
-  var w6=0;
-  var w7=0;
-  var w8=0;
-  var w9=0;
-  var w10=0;
-  var w11=0;
-  var w12=0;
-  var w13=0;
-  var w14=0;
+  var w4=0,w5=0,w6=0,w7=0,w8=0,w9=0,w10=0,w11=0,w12=0,w13=0,w14=0;
   var w16=(w0+(((w1>>>7)|(w1<<25))^((w1>>>18)|(w1<<14))^(w1>>>3))+w9+(((w14>>>17)|(w14<<15))^((w14>>>19)|(w14<<13))^(w14>>>10)))|0;
   var w17=(w1+(((w2>>>7)|(w2<<25))^((w2>>>18)|(w2<<14))^(w2>>>3))+w10+(((w15>>>17)|(w15<<15))^((w15>>>19)|(w15<<13))^(w15>>>10)))|0;
   var w18=(w2+(((w3>>>7)|(w3<<25))^((w3>>>18)|(w3<<14))^(w3>>>3))+w11+(((w16>>>17)|(w16<<15))^((w16>>>19)|(w16<<13))^(w16>>>10)))|0;
@@ -190,7 +176,6 @@ function solvePow(challenge, difficulty, maxIter) {
   var shift = 32 - Math.min(difficulty, 32);
   for (var n = 0; n < limit; n++) {
     var s = String(n);
-    // words 0..3 of block 2 (nonce up to 15 digits)
     var b = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], L = s.length;
     for (i = 0; i < L; i++) b[i] = s.charCodeAt(i) & 255;
     b[L] = 0x80;
@@ -202,7 +187,6 @@ function solvePow(challenge, difficulty, maxIter) {
     if (difficulty <= 32) {
       if ((h0 >>> shift) === 0 || (difficulty === 0)) return n;
     } else if (h0 === 0) {
-      // need more than 32 bits: verify with the generic path
       var full = shaCompress(mid, powBlock2(s));
       if (leadingZeroBits32(full[0]) + (full[0] === 0 ? leadingZeroBits32(full[1]) : 0) >= difficulty) return n;
     }
@@ -235,9 +219,11 @@ const MAX_OK = 6;
 const SITE_SUBS = true;
 const PROBE = false;
 
-const OS_BASE = "https://api.opensubtitles.com/api/v1";
-const OS_API_KEY = "p3XAEclHlMLgcbKZkP9y11t1XORnzgxs";
-const OS_LANGS = ["ar", "en"];
+// SubDL API configuration
+const SUBDL_API = "https://api.subdl.com/api/v1/subtitles";
+const SUBDL_DL_BASE = "https://dl.subdl.com";
+const SUBDL_API_KEY = "subdl_EMEpuxKwQRCDcVQSAwedNMvnhbDK0QiTH1Hj0Vuh2fo";
+const SUBDL_LANGS = ["AR", "EN"];
 
 const DIAG = [];
 
@@ -402,6 +388,81 @@ async function resolveMediaId(rawId, mediaType, season, episode) {
   return null;
 }
 
+// ---------- SubDL subtitles ----------
+function subdlLangCode(value) {
+  var s = String(value || "").toLowerCase().replace(/_/g, "-");
+  if (s === "ar" || s === "arabic" || s === "ara" || s.indexOf("ar-") === 0) return "ar";
+  if (s === "en" || s === "english" || s === "eng" || s.indexOf("en-") === 0) return "en";
+  return s.slice(0, 2);
+}
+
+async function fetchSubdlSubtitles(id, isTv, season, episode) {
+  try {
+    var q = [
+      "api_key=" + encodeURIComponent(SUBDL_API_KEY),
+      "tmdb_id=" + encodeURIComponent(String(id)),
+      "type=" + (isTv ? "tv" : "movie"),
+      "languages=" + encodeURIComponent(SUBDL_LANGS.join(",")),
+      "subs_per_page=30",
+    ];
+    if (isTv) {
+      q.push("season_number=" + encodeURIComponent(String(Number(season) || 1)));
+      q.push("episode_number=" + encodeURIComponent(String(Number(episode) || 1)));
+    }
+    var r = await withTimeout(
+      fetch(SUBDL_API + "?" + q.join("&"), {
+        headers: {
+          Accept: "application/json",
+          Authorization: "Bearer " + SUBDL_API_KEY,
+          "X-API-Key": SUBDL_API_KEY,
+          "User-Agent": "Nuvio Mapple Provider v1.0",
+        },
+      }),
+      4500
+    );
+    if (!r || !r.ok) return [];
+    var json = await r.json();
+    var list = (json && Array.isArray(json.subtitles)) ? json.subtitles : [];
+    var perLang = {};
+    var out = [];
+
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i] || {};
+      var lang = subdlLangCode(item.language || item.lang);
+      if (lang !== "ar" && lang !== "en") continue;
+      if ((perLang[lang] || 0) >= 2) continue;
+
+      var relUrl = item.url || item.subtitle_url || item.download_url;
+      if (!relUrl) continue;
+      var fullUrl = /^https?:/i.test(relUrl)
+        ? relUrl
+        : SUBDL_DL_BASE + (relUrl[0] === "/" ? relUrl : "/" + relUrl);
+
+      perLang[lang] = (perLang[lang] || 0) + 1;
+      var relName = String(item.release_name || item.name || "").trim();
+      var baseLabel = lang === "ar" ? "Arabic (SubDL)" : "English (SubDL)";
+      var label = relName ? baseLabel + " - " + relName.slice(0, 26) : baseLabel;
+
+      out.push({
+        url: fullUrl,
+        lang: lang,
+        language: lang,
+        label: label,
+        name: label,
+      });
+    }
+
+    // Put Arabic first, then English
+    out.sort(function (a, b) {
+      if (a.lang === b.lang) return 0;
+      return a.lang === "ar" ? -1 : 1;
+    });
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
 // ---------- session (cookie + request token) ----------
 function createSession() { return { cookie: "", requestToken: "" }; }
 
@@ -418,86 +479,6 @@ async function api(sess, method, path, body) {
   let json = null;
   try { json = JSON.parse(text); } catch (e) {}
   return { status: r.status, text: text, json: json };
-}
-
-function osHeaders() {
-  return {
-    Accept: "application/json",
-    "Content-Type": "application/json",
-    "Api-Key": OS_API_KEY,
-    "User-Agent": "Nuvio Mapple Provider v1.0",
-  };
-}
-
-async function osRequest(method, path, body) {
-  try {
-    const r = await fetch(OS_BASE + path, {
-      method: method,
-      headers: osHeaders(),
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const text = await r.text();
-    let json = null;
-    try { json = JSON.parse(text); } catch (e) {}
-    return { status: r.status, json: json };
-  } catch (e) {
-    return { status: 0, json: null };
-  }
-}
-
-function osLang(value) {
-  const s = String(value || "").toLowerCase().replace(/_/g, "-");
-  if (s === "ara" || s === "ar" || s.indexOf("ar-") === 0) return "ar";
-  if (s === "eng" || s === "en" || s.indexOf("en-") === 0) return "en";
-  return s.slice(0, 2);
-}
-
-function osSubtitleItem(item) {
-  const a = item && item.attributes ? item.attributes : {};
-  const files = Array.isArray(a.files) ? a.files : [];
-  const file = files[0] || {};
-  const lang = osLang(a.language || a.lang || file.language);
-  return {
-    lang: lang,
-    language: lang,
-    label: lang === "ar" ? "Arabic (OpenSubtitles)" : "English (OpenSubtitles)",
-    name: lang === "ar" ? "Arabic (OpenSubtitles)" : "English (OpenSubtitles)",
-    fileId: file.file_id || file.fileId || a.file_id || item.id,
-    score: Number(a.download_count || 0),
-  };
-}
-
-async function fetchOpenSubtitles(id, isTv, season, episode) {
-  try {
-    const q = [
-      "tmdb_id=" + encodeURIComponent(String(id)),
-      "languages=" + encodeURIComponent(OS_LANGS.join(",")),
-      "order_by=download_count",
-      "order_direction=desc",
-    ];
-    if (isTv) {
-      q.push("season_number=" + encodeURIComponent(String(Number(season) || 1)));
-      q.push("episode_number=" + encodeURIComponent(String(Number(episode) || 1)));
-    }
-    const search = await withTimeout(osRequest("GET", "/subtitles?" + q.join("&")), 4500);
-    const rows = search && search.json && Array.isArray(search.json.data) ? search.json.data : [];
-    const best = {};
-    rows.forEach((row) => {
-      const item = osSubtitleItem(row);
-      if (!item.fileId || OS_LANGS.indexOf(item.lang) < 0) return;
-      if (!best[item.lang] || item.score > best[item.lang].score) best[item.lang] = item;
-    });
-    const candidates = OS_LANGS.map((lang) => best[lang]).filter(Boolean);
-    const downloaded = await Promise.all(candidates.map(async (item) => {
-      const r = await withTimeout(osRequest("POST", "/download", { file_id: Number(item.fileId), sub_format: "srt" }), 4500);
-      const d = r && r.json ? (r.json.data || r.json) : {};
-      const url = d.link || d.url || d.download_url;
-      return url ? { url: url, lang: item.lang, language: item.lang, label: item.label, name: item.name } : null;
-    }));
-    return downloaded.filter(Boolean);
-  } catch (e) {
-    return [];
-  }
 }
 
 async function openSession(pagePath) {
@@ -651,7 +632,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     const scope = isTv ? target.season + "-" + target.episode : "";
     dbg.push(type + " " + id + (scope ? " " + scope : ""));
 
-    const externalSubsPromise = fetchOpenSubtitles(id, isTv, target.season, target.episode);
+    const externalSubsPromise = fetchSubdlSubtitles(id, isTv, target.season, target.episode);
 
     const pagePath = isTv ? "/watch/tv/" + id + "-" + scope : "/watch/movie/" + id;
     const sess = await openSession(pagePath);
@@ -685,10 +666,16 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       const su = f.data.stream_url;
       const full = absUrl(BASE + "/", su);
       const PH = Object.assign({}, UA, { Referer: BASE + "/", Origin: BASE });
-      const subs = SITE_SUBS ? toSubtitles(f.data) : [];
+      const subs = [];
+      // Put SubDL subtitles first so Arabic/English appear at the top
       externalSubs.forEach((s) => {
         if (!subs.some((x) => x.url === s.url)) subs.push(s);
       });
+      if (SITE_SUBS) {
+        toSubtitles(f.data).forEach((s) => {
+          if (!subs.some((x) => x.url === s.url)) subs.push(s);
+        });
+      }
       const links = /m3u8|playlist/i.test(full) ? await expandHls(full, PH) : [{ url: full, quality: "Direct", height: 0 }];
       if (SITE_SUBS && links.subtitles && links.subtitles.length) {
         links.subtitles.forEach((s) => {
