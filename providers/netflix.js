@@ -339,7 +339,6 @@
 
   async function expandM3u8Variants(masterUrl, headers, titleLabel, baseSubtitles) {
     var subtitles = Array.isArray(baseSubtitles) ? baseSubtitles.slice() : [];
-    var audioTracks = [];
 
     var baseStream = {
       name: "Netflix (NetMirror)",
@@ -347,8 +346,7 @@
       url: masterUrl,
       quality: "Auto",
       headers: headers,
-      subtitles: subtitles,
-      audioTracks: audioTracks
+      subtitles: subtitles
     };
 
     try {
@@ -365,11 +363,11 @@
 
         if (line.indexOf("#EXT-X-MEDIA:") === 0) {
           var mediaType = extractAttr(line, "TYPE").toUpperCase();
-          var mediaName = extractAttr(line, "NAME") || extractAttr(line, "LANGUAGE") || "Track";
+          var mediaName = extractAttr(line, "NAME") || extractAttr(line, "LANGUAGE") || "Subtitle";
           var mediaLang = extractAttr(line, "LANGUAGE") || mediaName;
           var mediaUri = resolvePlaylistUri(masterUrl, extractAttr(line, "URI"));
 
-          if (mediaType === "SUBTITLES" && mediaUri) {
+          if (mediaType === "SUBTITLES" && mediaUri && /^https?:\/\//i.test(mediaUri)) {
             var existsSub = subtitles.some(function (s) { return s.url === mediaUri; });
             if (!existsSub) {
               subtitles.push({
@@ -378,12 +376,6 @@
                 name: mediaName
               });
             }
-          } else if (mediaType === "AUDIO") {
-            audioTracks.push({
-              name: mediaName,
-              language: mediaLang,
-              url: mediaUri || masterUrl
-            });
           }
           continue;
         }
@@ -413,8 +405,7 @@
               quality: formatQualityLabel(resVal, bwVal),
               _height: parseHeight(resVal),
               headers: headers,
-              subtitles: subtitles,
-              audioTracks: audioTracks
+              subtitles: subtitles
             });
           }
         }
@@ -431,17 +422,12 @@
           url: v.url,
           quality: v.quality,
           headers: v.headers,
-          subtitles: v.subtitles,
-          audioTracks: v.audioTracks
+          subtitles: subtitles
         };
       });
 
       baseStream.subtitles = subtitles;
-      baseStream.audioTracks = audioTracks;
-
-      if (cleanVariants.length > 0) {
-        return [baseStream].concat(cleanVariants);
-      }
+      return cleanVariants.length > 0 ? [baseStream].concat(cleanVariants) : [baseStream];
     } catch (_) {}
 
     return [baseStream];
