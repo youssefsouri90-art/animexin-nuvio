@@ -106,11 +106,45 @@ async function getTmdbTitlesByNumericId(numId, mediaType) {
   }
 }
 
-async function getJikanTitles(malId) {
-  const cleanId = String(malId || "").replace(/^mal:/i, "").trim();
+async function getMalTitles(malId) {
+  const cleanId = String(malId || "").replace(/^mal[:_-]?/i, "").trim();
   if (!/^\d+$/.test(cleanId)) return [];
+
   try {
-    const res = await fetch("https://api.jikan.moe/v4/anime/" + cleanId);
+    const alRes = await fetch("https://graphql.anilist.co", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "User-Agent": UA["User-Agent"],
+      },
+      body: JSON.stringify({
+        query:
+          "query ($idMal: Int) { Media(idMal: $idMal, type: ANIME) { title { romaji english native } synonyms } }",
+        variables: { idMal: Number(cleanId) },
+      }),
+    });
+    if (alRes.ok) {
+      const alJson = await alRes.json();
+      const media = alJson && alJson.data && alJson.data.Media;
+      if (media) {
+        const t = media.title || {};
+        const titles = [
+          t.romaji,
+          t.english,
+          t.native,
+          ...(Array.isArray(media.synonyms) ? media.synonyms : []),
+        ];
+        const deduped = dedupeTitles(titles);
+        if (deduped.length) return deduped;
+      }
+    }
+  } catch (e) {}
+
+  try {
+    const res = await fetch("https://api.jikan.moe/v4/anime/" + cleanId, {
+      headers: UA,
+    });
     if (!res.ok) return [];
     const j = await res.json();
     const d = j && j.data;
@@ -129,7 +163,7 @@ async function getJikanTitles(malId) {
 }
 
 async function getKitsuTitles(kitsuId) {
-  const cleanId = String(kitsuId || "").replace(/^kitsu:/i, "").trim();
+  const cleanId = String(kitsuId || "").replace(/^kitsu[:_-]?/i, "").trim();
   if (!/^\d+$/.test(cleanId)) return [];
   try {
     const res = await fetch(
@@ -164,15 +198,15 @@ async function getAnimeTitles(id, mediaType) {
   const raw = String(id || "").trim();
   if (!raw) return [];
 
-  if (/^mal:/i.test(raw)) {
-    return await getJikanTitles(raw);
+  if (/^mal[:_-]/i.test(raw)) {
+    return await getMalTitles(raw);
   }
-  if (/^kitsu:/i.test(raw)) {
+  if (/^kitsu[:_-]/i.test(raw)) {
     return await getKitsuTitles(raw);
   }
-  if (/^tmdb:/i.test(raw)) {
+  if (/^tmdb[:_-]/i.test(raw)) {
     return await getTmdbTitlesByNumericId(
-      raw.replace(/^tmdb:/i, "").trim(),
+      raw.replace(/^tmdb[:_-]/i, "").trim(),
       mediaType
     );
   }
@@ -183,7 +217,7 @@ async function getAnimeTitles(id, mediaType) {
   const tmdbTitles = await getTmdbTitlesByNumericId(raw, mediaType);
   if (tmdbTitles.length) return tmdbTitles;
 
-  const malTitles = await getJikanTitles(raw);
+  const malTitles = await getMalTitles(raw);
   if (malTitles.length) return malTitles;
 
   return await getKitsuTitles(raw);
