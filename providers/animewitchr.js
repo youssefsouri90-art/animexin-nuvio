@@ -1,10 +1,3 @@
-cd /data/data/com.termux/files/home
-rm -rf animexin-nuvio-fix
-git clone https://github.com/youssefsouri90-art/animexin-nuvio.git animexin-nuvio-fix
-cd animexin-nuvio-fix
-mkdir -p providers
-
-cat << 'EOF' > providers/animewitchr.js
 const FIREBASE_PROJECT_ID = "animewitcher-1c66d";
 const FIREBASE_API_KEY = "AIzaSyAcbWRwfFNnCpoydDXlEALWnM_TYVcJOMU";
 const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
@@ -351,75 +344,77 @@ async function verifyPlayableStream(url) {
 }
 
 async function getStreams(id, mediaType, season, episode) {
-  const isMovie = mediaType === "movie";
-  const epNum = isMovie ? 1 : Number(episode || season || 1) || 1;
+  try {
+    const isMovie = mediaType === "movie";
+    const epNum = isMovie ? 1 : Number(episode || season || 1) || 1;
 
-  const animeId = await resolveMatchedAnimeId(id, mediaType, season);
-  if (!animeId) return [];
+    const animeId = await resolveMatchedAnimeId(id, mediaType, season);
+    if (!animeId) return [];
 
-  const cleanAnime = encodeURIComponent(animeId);
-  const epRes = await fetch(
-    firestoreDocUrl("anime_list/" + cleanAnime + "/episodes_summery/summery")
-  );
-  if (!epRes.ok) return [];
+    const cleanAnime = encodeURIComponent(animeId);
+    const epRes = await fetch(
+      firestoreDocUrl("anime_list/" + cleanAnime + "/episodes_summery/summery")
+    );
+    if (!epRes.ok) return [];
 
-  const epDoc = parseFirestoreDoc(await epRes.json());
-  const episodes = Array.isArray(epDoc.episodes) ? epDoc.episodes : [];
-  const epDocId = pickEpisodeDocId(episodes, epNum);
-  if (!epDocId) return [];
+    const epDoc = parseFirestoreDoc(await epRes.json());
+    const episodes = Array.isArray(epDoc.episodes) ? epDoc.episodes : [];
+    const epDocId = pickEpisodeDocId(episodes, epNum);
+    if (!epDocId) return [];
 
-  const srvRes = await fetch(
-    firestoreDocUrl(
-      "anime_list/" +
-        cleanAnime +
-        "/episodes/" +
-        encodeURIComponent(epDocId) +
-        "/servers2/all_servers"
-    )
-  );
-  if (!srvRes.ok) return [];
+    const srvRes = await fetch(
+      firestoreDocUrl(
+        "anime_list/" +
+          cleanAnime +
+          "/episodes/" +
+          encodeURIComponent(epDocId) +
+          "/servers2/all_servers"
+      )
+    );
+    if (!srvRes.ok) return [];
 
-  const srvDoc = parseFirestoreDoc(await srvRes.json());
-  const servers = Array.isArray(srvDoc.servers) ? srvDoc.servers : [];
+    const srvDoc = parseFirestoreDoc(await srvRes.json());
+    const servers = Array.isArray(srvDoc.servers) ? srvDoc.servers : [];
 
-  const candidates = servers
-    .filter(function (srv) {
-      return srv && srv.visible !== false && srv.link;
-    })
-    .map(function (srv) {
-      return {
-        name: srv.name || "PD",
-        quality: srv.quality || "Auto",
-        url: resolveDirectCandidate(srv.link),
-      };
-    })
-    .filter(function (c) {
-      return Boolean(c.url);
-    });
+    const candidates = servers
+      .filter(function (srv) {
+        return srv && srv.visible !== false && srv.link;
+      })
+      .map(function (srv) {
+        return {
+          name: srv.name || "PD",
+          quality: srv.quality || "Auto",
+          url: resolveDirectCandidate(srv.link),
+        };
+      })
+      .filter(function (c) {
+        return Boolean(c.url);
+      });
 
-  const verifiedList = await Promise.all(
-    candidates.map(async function (c) {
-      const finalUrl = await verifyPlayableStream(c.url);
-      if (!finalUrl) return null;
-      return {
-        name: "AnimeWitcher",
-        title: animeId + " - Ep " + epDocId + " (" + c.name + " " + c.quality + ")",
-        quality: c.quality,
-        url: finalUrl,
-        headers: UA,
-      };
-    })
-  );
+    const verifiedList = await Promise.all(
+      candidates.map(async function (c) {
+        const finalUrl = await verifyPlayableStream(c.url);
+        if (!finalUrl) return null;
+        return {
+          name: "AnimeWitcher",
+          title:
+            animeId + " - Ep " + epDocId + " (" + c.name + " " + c.quality + ")",
+          quality: c.quality,
+          url: finalUrl,
+          headers: UA,
+        };
+      })
+    );
 
-  return verifiedList.filter(Boolean);
+    return verifiedList.filter(Boolean);
+  } catch (e) {
+    return [];
+  }
 }
 
-module.exports = {
-  getStreams: getStreams,
-};
-EOF
-
-node -e 'require("./providers/animewitchr.js").getStreams("209867", "tv", 1, 1).then(r => console.log(r.map(x => x.title)))'
-git add providers/animewitchr.js
-git commit -m "Fix animewitchr matching threshold and episode resolution"
-git push
+if (typeof globalThis !== "undefined") {
+  globalThis.getStreams = getStreams;
+}
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { getStreams: getStreams };
+}
