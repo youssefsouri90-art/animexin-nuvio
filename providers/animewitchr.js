@@ -74,132 +74,98 @@ function parseFirestoreDoc(doc) {
   return out;
 }
 
-async function getTmdbTitlesByNumericId(numId, mediaType) {
+function getTmdbTitlesByNumericId(numId, mediaType) {
   const type = mediaType === "movie" ? "movie" : "tv";
-  try {
-    const res = await fetch(
-      "https://api.themoviedb.org/3/" +
-        type +
-        "/" +
-        numId +
-        "?api_key=" +
-        TMDB_KEY +
-        "&append_to_response=alternative_titles"
-    );
-    if (!res.ok) return [];
-    const j = await res.json();
-    const titles = [j.name || j.title, j.original_name || j.original_title];
+  const url =
+    "https://api.themoviedb.org/3/" +
+    type +
+    "/" +
+    numId +
+    "?api_key=" +
+    TMDB_KEY +
+    "&append_to_response=alternative_titles";
 
-    const alt =
-      (j.alternative_titles &&
-        (j.alternative_titles.results || j.alternative_titles.titles)) ||
-      [];
-    alt.forEach(function (a) {
-      if (a && a.title && /^(US|GB|JP)$/.test(a.iso_3166_1 || "")) {
-        titles.push(a.title);
-      }
+  return fetch(url)
+    .then(function (res) {
+      if (!res || !res.ok) return null;
+      return res.json();
+    })
+    .then(function (j) {
+      if (!j) return [];
+      const titles = [j.name || j.title, j.original_name || j.original_title];
+      const alt =
+        (j.alternative_titles &&
+          (j.alternative_titles.results || j.alternative_titles.titles)) ||
+        [];
+      alt.forEach(function (a) {
+        if (a && a.title && /^(US|GB|JP)$/.test(a.iso_3166_1 || "")) {
+          titles.push(a.title);
+        }
+      });
+      return dedupeTitles(titles);
+    })
+    .catch(function () {
+      return [];
     });
-
-    return dedupeTitles(titles);
-  } catch (e) {
-    return [];
-  }
 }
 
-async function getMalTitlesViaAniList(malId) {
-  const cleanId = String(malId || "").replace(/^mal[:_-]?/i, "").trim();
-  if (!/^\d+$/.test(cleanId)) return [];
-  try {
-    const res = await fetch("https://graphql.anilist.co", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "User-Agent": UA["User-Agent"],
-      },
-      body: JSON.stringify({
-        query:
-          "query ($idMal: Int) { Media(idMal: $idMal, type: ANIME) { title { romaji english native } synonyms } }",
-        variables: { idMal: Number(cleanId) },
-      }),
-    });
-    if (!res.ok) return [];
-    const j = await res.json();
-    const media = j && j.data && j.data.Media;
-    if (!media) return [];
-    const t = media.title || {};
-    return dedupeTitles([
-      t.romaji,
-      t.english,
-      t.native,
-      ...(Array.isArray(media.synonyms) ? media.synonyms : []),
-    ]);
-  } catch (e) {
-    return [];
-  }
-}
-
-async function getKitsuTitles(kitsuId) {
+function getKitsuTitles(kitsuId) {
   const cleanId = String(kitsuId || "").replace(/^kitsu[:_-]?/i, "").trim();
-  if (!/^\d+$/.test(cleanId)) return [];
-  try {
-    const res = await fetch(
-      "https://kitsu.io/api/edge/anime/" + encodeURIComponent(cleanId),
-      {
-        headers: {
-          Accept: "application/vnd.api+json",
-          "User-Agent": UA["User-Agent"],
-        },
-      }
-    );
-    if (!res.ok) return [];
-    const j = await res.json();
-    const attrs = (j && j.data && j.data.attributes) || {};
-    const titlesObj = attrs.titles || {};
-    return dedupeTitles([
-      attrs.canonicalTitle,
-      titlesObj.en,
-      titlesObj.en_jp,
-      titlesObj.ja_jp,
-      ...(Array.isArray(attrs.abbreviatedTitles)
-        ? attrs.abbreviatedTitles
-        : []),
-    ]);
-  } catch (e) {
-    return [];
-  }
+  if (!/^\d+$/.test(cleanId)) return Promise.resolve([]);
+
+  return fetch("https://kitsu.io/api/edge/anime/" + encodeURIComponent(cleanId), {
+    headers: {
+      Accept: "application/vnd.api+json",
+      "User-Agent": UA["User-Agent"],
+    },
+  })
+    .then(function (res) {
+      if (!res || !res.ok) return null;
+      return res.json();
+    })
+    .then(function (j) {
+      if (!j) return [];
+      const attrs = (j.data && j.data.attributes) || {};
+      const titlesObj = attrs.titles || {};
+      return dedupeTitles([
+        attrs.canonicalTitle,
+        titlesObj.en,
+        titlesObj.en_jp,
+        titlesObj.ja_jp,
+        ...(Array.isArray(attrs.abbreviatedTitles)
+          ? attrs.abbreviatedTitles
+          : []),
+      ]);
+    })
+    .catch(function () {
+      return [];
+    });
 }
 
-async function getAnimeTitles(id, mediaType) {
+function getAnimeTitles(id, mediaType) {
   const raw = String(id || "").trim();
-  if (!raw) return [];
+  if (!raw) return Promise.resolve([]);
 
-  if (/^mal[:_-]/i.test(raw)) {
-    return await getMalTitlesViaAniList(raw);
-  }
   if (/^kitsu[:_-]/i.test(raw)) {
-    return await getKitsuTitles(raw);
+    return getKitsuTitles(raw);
   }
   if (/^tmdb[:_-]/i.test(raw)) {
-    return await getTmdbTitlesByNumericId(
+    return getTmdbTitlesByNumericId(
       raw.replace(/^tmdb[:_-]/i, "").trim(),
       mediaType
     );
   }
   if (!/^\d+$/.test(raw)) {
-    return dedupeTitles([raw]);
+    return Promise.resolve(dedupeTitles([raw]));
   }
 
-  const tmdbTitles = await getTmdbTitlesByNumericId(raw, mediaType);
-  if (tmdbTitles.length) return tmdbTitles;
-
-  const kitsuTitles = await getKitsuTitles(raw);
-  if (kitsuTitles.length) return kitsuTitles;
-
-  return await getMalTitlesViaAniList(raw);
+  return getTmdbTitlesByNumericId(raw, mediaType).then(function (tmdbTitles) {
+    if (tmdbTitles && tmdbTitles.length) return tmdbTitles;
+    return getKitsuTitles(raw);
+  });
 }
 
-async function queryAlgoliaSeries(query) {
+function queryAlgoliaSeries(query) {
   const url =
     "https://" +
     DEFAULT_ALGOLIA.appId +
@@ -209,7 +175,7 @@ async function queryAlgoliaSeries(query) {
     hitsPerPage: "10",
   }).toString();
 
-  const res = await fetch(url, {
+  return fetch(url, {
     method: "POST",
     headers: {
       "X-Algolia-Application-Id": DEFAULT_ALGOLIA.appId,
@@ -218,10 +184,17 @@ async function queryAlgoliaSeries(query) {
       "User-Agent": UA["User-Agent"],
     },
     body: JSON.stringify({ params: params }),
-  });
-  if (!res.ok) return [];
-  const json = await res.json();
-  return (json && json.hits) || [];
+  })
+    .then(function (res) {
+      if (!res || !res.ok) return null;
+      return res.json();
+    })
+    .then(function (json) {
+      return (json && json.hits) || [];
+    })
+    .catch(function () {
+      return [];
+    });
 }
 
 function extractAnimeId(hit) {
@@ -329,42 +302,51 @@ function scoreCandidate(candidateTitles, cand, season) {
   return score;
 }
 
-async function resolveMatchedAnimeId(id, mediaType, season) {
+function resolveMatchedAnimeId(id, mediaType, season) {
   const raw = String(id || "").trim();
-  if (!raw) return null;
+  if (!raw) return Promise.resolve(null);
   if (raw.indexOf("anime_list/") === 0) {
-    return raw.replace(/^anime_list\//, "");
+    return Promise.resolve(raw.replace(/^anime_list\//, ""));
   }
 
-  const titles = await getAnimeTitles(raw, mediaType);
-  if (!titles.length) return null;
+  return getAnimeTitles(raw, mediaType).then(function (titles) {
+    if (!titles || !titles.length) return null;
 
-  const pool = {};
-  const queries = titles.slice(0, 3);
+    const pool = {};
+    const queries = titles.slice(0, 3);
 
-  for (let i = 0; i < queries.length; i++) {
-    const hits = await queryAlgoliaSeries(queries[i]);
-    hits.forEach(function (h) {
-      const info = collectHitInfo(h);
-      if (!info.id) return;
-      if (!pool[info.id]) {
-        pool[info.id] = { id: info.id, names: [], isZeroEps: info.isZeroEps };
-      }
-      pool[info.id].names = pool[info.id].names.concat(info.names);
-      if (info.isZeroEps) pool[info.id].isZeroEps = true;
-    });
-  }
-
-  let best = null;
-  Object.keys(pool).forEach(function (aid) {
-    const sc = scoreCandidate(titles, pool[aid], season);
-    if (sc > 0 && (!best || sc > best.score)) {
-      best = { id: aid, score: sc };
-    }
+    return queries
+      .reduce(function (chain, q) {
+        return chain.then(function () {
+          return queryAlgoliaSeries(q).then(function (hits) {
+            hits.forEach(function (h) {
+              const info = collectHitInfo(h);
+              if (!info.id) return;
+              if (!pool[info.id]) {
+                pool[info.id] = {
+                  id: info.id,
+                  names: [],
+                  isZeroEps: info.isZeroEps,
+                };
+              }
+              pool[info.id].names = pool[info.id].names.concat(info.names);
+              if (info.isZeroEps) pool[info.id].isZeroEps = true;
+            });
+          });
+        });
+      }, Promise.resolve())
+      .then(function () {
+        let best = null;
+        Object.keys(pool).forEach(function (aid) {
+          const sc = scoreCandidate(titles, pool[aid], season);
+          if (sc > 0 && (!best || sc > best.score)) {
+            best = { id: aid, score: sc };
+          }
+        });
+        if (!best || best.score < 0.45) return null;
+        return best.id;
+      });
   });
-
-  if (!best || best.score < 0.45) return null;
-  return best.id;
 }
 
 function pickEpisodeDocId(episodes, episodeNum) {
@@ -407,101 +389,133 @@ function resolveDirectCandidate(rawLink) {
   return null;
 }
 
-async function verifyPlayableStream(url) {
-  try {
-    let res = await fetch(url, {
-      method: "HEAD",
-      headers: UA,
-      redirect: "follow",
+function verifyPlayableStream(url) {
+  return fetch(url, {
+    method: "HEAD",
+    headers: UA,
+    redirect: "follow",
+  })
+    .then(function (res) {
+      if (res && (res.status === 405 || res.status === 403)) {
+        return fetch(url, {
+          method: "GET",
+          headers: {
+            "User-Agent": UA["User-Agent"],
+            Range: "bytes=0-15",
+          },
+          redirect: "follow",
+        });
+      }
+      return res;
+    })
+    .then(function (res) {
+      if (!res) return null;
+      const ct = (res.headers.get("content-type") || "").toLowerCase();
+      const isMedia =
+        ct.indexOf("video/") !== -1 ||
+        ct.indexOf("application/octet-stream") !== -1;
+      if (!res.ok || !isMedia) return null;
+      return res.url || url;
+    })
+    .catch(function () {
+      return null;
     });
-    if (res.status === 405 || res.status === 403) {
-      res = await fetch(url, {
-        method: "GET",
-        headers: {
-          "User-Agent": UA["User-Agent"],
-          Range: "bytes=0-15",
-        },
-        redirect: "follow",
-      });
-    }
-    const ct = (res.headers.get("content-type") || "").toLowerCase();
-    const isMedia =
-      ct.indexOf("video/") !== -1 ||
-      ct.indexOf("application/octet-stream") !== -1;
-    if (!res.ok || !isMedia) return null;
-    return res.url || url;
-  } catch (e) {
-    return null;
-  }
 }
 
-async function getStreams(id, mediaType, season, episode) {
-  try {
-    const isMovie = mediaType === "movie";
-    const epNum = isMovie ? 1 : Number(episode || season || 1) || 1;
+function getStreams(id, mediaType, season, episode) {
+  const isMovie = mediaType === "movie";
+  const epNum = isMovie ? 1 : Number(episode || season || 1) || 1;
+  let resolvedAnimeId = null;
+  let resolvedEpDocId = null;
 
-    const animeId = await resolveMatchedAnimeId(id, mediaType, season);
-    if (!animeId) return [];
-
-    const cleanAnime = encodeURIComponent(animeId);
-    const epRes = await fetch(
-      firestoreDocUrl("anime_list/" + cleanAnime + "/episodes_summery/summery")
-    );
-    if (!epRes.ok) return [];
-
-    const epDoc = parseFirestoreDoc(await epRes.json());
-    const episodes = Array.isArray(epDoc.episodes) ? epDoc.episodes : [];
-    const epDocId = pickEpisodeDocId(episodes, epNum);
-    if (!epDocId) return [];
-
-    const srvRes = await fetch(
-      firestoreDocUrl(
-        "anime_list/" +
-          cleanAnime +
-          "/episodes/" +
-          encodeURIComponent(epDocId) +
-          "/servers2/all_servers"
+  return resolveMatchedAnimeId(id, mediaType, season)
+    .then(function (animeId) {
+      if (!animeId) return null;
+      resolvedAnimeId = animeId;
+      const cleanAnime = encodeURIComponent(animeId);
+      return fetch(
+        firestoreDocUrl("anime_list/" + cleanAnime + "/episodes_summery/summery")
       )
-    );
-    if (!srvRes.ok) return [];
+        .then(function (epRes) {
+          if (!epRes || !epRes.ok) return null;
+          return epRes.json();
+        })
+        .then(function (rawEp) {
+          if (!rawEp) return null;
+          const epDoc = parseFirestoreDoc(rawEp);
+          const episodes = Array.isArray(epDoc.episodes) ? epDoc.episodes : [];
+          const epDocId = pickEpisodeDocId(episodes, epNum);
+          if (!epDocId) return null;
+          resolvedEpDocId = epDocId;
 
-    const srvDoc = parseFirestoreDoc(await srvRes.json());
-    const servers = Array.isArray(srvDoc.servers) ? srvDoc.servers : [];
+          return fetch(
+            firestoreDocUrl(
+              "anime_list/" +
+                cleanAnime +
+                "/episodes/" +
+                encodeURIComponent(epDocId) +
+                "/servers2/all_servers"
+            )
+          )
+            .then(function (srvRes) {
+              if (!srvRes || !srvRes.ok) return null;
+              return srvRes.json();
+            })
+            .then(function (rawSrv) {
+              if (!rawSrv) return [];
+              const srvDoc = parseFirestoreDoc(rawSrv);
+              const servers = Array.isArray(srvDoc.servers)
+                ? srvDoc.servers
+                : [];
 
-    const candidates = servers
-      .filter(function (srv) {
-        return srv && srv.visible !== false && srv.link;
-      })
-      .map(function (srv) {
-        return {
-          name: srv.name || "PD",
-          quality: srv.quality || "Auto",
-          url: resolveDirectCandidate(srv.link),
-        };
-      })
-      .filter(function (c) {
-        return Boolean(c.url);
-      });
+              const candidates = servers
+                .filter(function (srv) {
+                  return srv && srv.visible !== false && srv.link;
+                })
+                .map(function (srv) {
+                  return {
+                    name: srv.name || "PD",
+                    quality: srv.quality || "Auto",
+                    url: resolveDirectCandidate(srv.link),
+                  };
+                })
+                .filter(function (c) {
+                  return Boolean(c.url);
+                });
 
-    const verifiedList = await Promise.all(
-      candidates.map(async function (c) {
-        const finalUrl = await verifyPlayableStream(c.url);
-        if (!finalUrl) return null;
-        return {
-          name: "AnimeWitcher",
-          title:
-            animeId + " - Ep " + epDocId + " (" + c.name + " " + c.quality + ")",
-          quality: c.quality,
-          url: finalUrl,
-          headers: UA,
-        };
-      })
-    );
-
-    return verifiedList.filter(Boolean);
-  } catch (e) {
-    return [];
-  }
+              return Promise.all(
+                candidates.map(function (c) {
+                  return verifyPlayableStream(c.url).then(function (finalUrl) {
+                    if (!finalUrl) return null;
+                    return {
+                      name: "AnimeWitcher",
+                      title:
+                        resolvedAnimeId +
+                        " - Ep " +
+                        resolvedEpDocId +
+                        " (" +
+                        c.name +
+                        " " +
+                        c.quality +
+                        ")",
+                      quality: c.quality,
+                      url: finalUrl,
+                      headers: UA,
+                    };
+                  });
+                })
+              ).then(function (list) {
+                return list.filter(Boolean);
+              });
+            });
+        });
+    })
+    .then(function (res) {
+      return Array.isArray(res) ? res : [];
+    })
+    .catch(function () {
+      return [];
+    });
 }
 
 if (typeof globalThis !== "undefined") {
