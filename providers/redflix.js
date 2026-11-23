@@ -1,4 +1,4 @@
-// Redflix provider for Nuvio (Vidbolt + Vidly).
+// Redflix provider for Nuvio (Vidbolt + Vidly + Subtitles).
 const SITE = "https://redflix.ac";
 const VIDBOLT_SITE = "https://vidbolt.st";
 const VIDBOLT_API = VIDBOLT_SITE + "/api/resolve";
@@ -46,15 +46,27 @@ async function getJson(url, headers) {
 
 function parseMaster(text, baseUrl, key) {
   const lines = text.split(/\r?\n/);
-  const media = [], audioTracks = [], variants = [];
+  const media = [], audioTracks = [], subtitles = [], variants = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (line.indexOf("#EXT-X-MEDIA") === 0) {
       const updated = line.replace(/URI="([^"]+)"/, (m, u) => 'URI="' + withKey(absUrl(baseUrl, u), key) + '"');
       media.push(updated);
+
       if (/TYPE=AUDIO/.test(updated)) {
         const nameMatch = /NAME="([^"]+)"/.exec(updated);
         audioTracks.push((nameMatch && nameMatch[1]) || "Audio");
+      } else if (/TYPE=SUBTITLES/.test(updated)) {
+        const uriMatch = /URI="([^"]+)"/.exec(updated);
+        if (uriMatch && uriMatch[1]) {
+          const nameMatch = /NAME="([^"]+)"/.exec(updated);
+          const langMatch = /LANGUAGE="([^"]+)"/.exec(updated);
+          subtitles.push({
+            url: uriMatch[1],
+            lang: (langMatch && langMatch[1]) || "und",
+            label: (nameMatch && nameMatch[1]) || "Subtitle",
+          });
+        }
       }
     } else if (line.indexOf("#EXT-X-STREAM-INF") === 0) {
       let next = "";
@@ -69,20 +81,22 @@ function parseMaster(text, baseUrl, key) {
     }
   }
   variants.sort((a, b) => b.height - a.height);
-  return { media, audioTracks, variants };
+  return { media, audioTracks, subtitles, variants };
 }
 
 function buildMasterStream(label, masterUrl, masterText, fallbackQuality, siteOrigin) {
   const key = (/[?&]api_key=([^&]+)/.exec(masterUrl) || [])[1] || "";
-  const parsed = masterText ? parseMaster(masterText, masterUrl, key) : { media: [], audioTracks: [], variants: [] };
+  const parsed = masterText ? parseMaster(masterText, masterUrl, key) : { media: [], audioTracks: [], subtitles: [], variants: [] };
   const max = parsed.variants.length ? parsed.variants[0].height : 0;
   const audioInfo = parsed.audioTracks.length ? " | " + parsed.audioTracks.join(", ") : "";
+  const subInfo = parsed.subtitles.length ? " | Subs: " + parsed.subtitles.map((s) => s.label).join(", ") : "";
   return {
     name: "Redflix",
-    title: label + " (Audio" + audioInfo + ")",
+    title: label + " (Audio" + audioInfo + subInfo + ")",
     url: masterUrl,
     quality: max ? "Auto (up to " + qualityLabel(max) + ")" : (fallbackQuality || "Auto"),
     headers: playHeaders(siteOrigin),
+    subtitles: parsed.subtitles,
     provider: "redflix",
   };
 }
