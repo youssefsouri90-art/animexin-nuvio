@@ -61,7 +61,6 @@
   }
 
   function base64Decode(str) {
-    if (typeof atob === "function") return atob(str);
     var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
     var input = String(str || "").replace(/[^A-Za-z0-9\+\/\=]/g, "");
     var output = "";
@@ -403,10 +402,15 @@
       if (kind !== "movie") {
         var postUrl = BASE_URL + "/mobile/post.php?id=" + encodeURIComponent(postId) + "&t=" + Date.now();
         var postData = await fetchJson(postUrl, nfHeaders(), 4500);
-        targetId = await resolveEpisodeId(postData, postId, season || 1, episode || 1);
+        if (postData) {
+          targetId = await resolveEpisodeId(postData, postId, season || 1, episode || 1);
+        }
       }
 
       var playerJson = await fetchNewTvPlayer(targetId);
+      if ((!playerJson || !playerJson.video_link) && targetId !== postId) {
+        playerJson = await fetchNewTvPlayer(postId);
+      }
       if (!playerJson || !playerJson.video_link) return [];
 
       var titleLabel = found.t || found.title || queryTitles[0];
