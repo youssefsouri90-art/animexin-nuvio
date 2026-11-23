@@ -10,7 +10,11 @@ const UA = {
   "User-Agent":
     "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36",
 };
-const PLAY_HEADERS = Object.assign({}, UA, { Referer: SITE + "/", Origin: SITE });
+const PLAY_HEADERS = Object.assign({}, UA, {
+  Referer: SITE + "/",
+  Origin: SITE,
+  Accept: "*/*",
+});
 
 // ---------- helpers ----------
 function b64encode(str) {
@@ -21,8 +25,11 @@ function b64encode(str) {
     const b = i + 1 < str.length ? str.charCodeAt(i + 1) & 255 : NaN;
     const c = i + 2 < str.length ? str.charCodeAt(i + 2) & 255 : NaN;
     const n = (a << 16) | ((b || 0) << 8) | (c || 0);
-    out += chars[(n >> 18) & 63] + chars[(n >> 12) & 63] +
-      (isNaN(b) ? "=" : chars[(n >> 6) & 63]) + (isNaN(c) ? "=" : chars[n & 63]);
+    out +=
+      chars[(n >> 18) & 63] +
+      chars[(n >> 12) & 63] +
+      (isNaN(b) ? "=" : chars[(n >> 6) & 63]) +
+      (isNaN(c) ? "=" : chars[n & 63]);
   }
   return out;
 }
@@ -52,8 +59,11 @@ function withKey(u, key) {
 async function getJson(url, headers) {
   const r = await fetch(url, { headers: Object.assign({}, UA, headers || {}) });
   const t = await r.text();
-  try { return { ok: true, json: JSON.parse(t), raw: t }; }
-  catch (e) { return { ok: false, raw: t }; }
+  try {
+    return { ok: true, json: JSON.parse(t), raw: t };
+  } catch (e) {
+    return { ok: false, raw: t };
+  }
 }
 
 async function callResolve(type, id, season, episode) {
@@ -80,16 +90,22 @@ async function callResolve(type, id, season, episode) {
 // Parse the HLS master that the API returns inline.
 function parseMaster(text, baseUrl, key) {
   const lines = text.split(/\r?\n/);
-  const media = [], variants = [];
+  const media = [],
+    variants = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (line.indexOf("#EXT-X-MEDIA") === 0) {
-      media.push(line.replace(/URI="([^"]+)"/, (m, u) => 'URI="' + withKey(absUrl(baseUrl, u), key) + '"'));
+      media.push(
+        line.replace(/URI="([^"]+)"/, (m, u) => 'URI="' + withKey(absUrl(baseUrl, u), key) + '"')
+      );
     } else if (line.indexOf("#EXT-X-STREAM-INF") === 0) {
       let next = "";
       for (let k = i + 1; k < lines.length; k++) {
         const t = lines[k].trim();
-        if (t && t[0] !== "#") { next = t; break; }
+        if (t && t[0] !== "#") {
+          next = t;
+          break;
+        }
       }
       const res = /RESOLUTION=(\d+)x(\d+)/.exec(line);
       if (!next || !res) continue;
@@ -104,7 +120,8 @@ function parseMaster(text, baseUrl, key) {
 // One self-contained master per quality, so each quality is its own choice
 // while audio / subtitle tracks (which are separate playlists) keep working.
 function singleQualityMaster(parsed, v) {
-  const text = ["#EXTM3U", "#EXT-X-VERSION:3"].concat(parsed.media, [v.info, v.url]).join("\n") + "\n";
+  const text =
+    ["#EXTM3U", "#EXT-X-VERSION:3"].concat(parsed.media, [v.info, v.url]).join("\n") + "\n";
   return "data:application/x-mpegURL;base64," + b64encode(text);
 }
 
@@ -116,13 +133,22 @@ const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
 async function tmdbGet(path) {
   try {
     const sep = path.indexOf("?") >= 0 ? "&" : "?";
-    return await (await fetch(`https://api.themoviedb.org/3/${path}${sep}api_key=${TMDB_KEY}`)).json();
-  } catch (e) { return {}; }
+    return await (
+      await fetch(`https://api.themoviedb.org/3/${path}${sep}api_key=${TMDB_KEY}`)
+    ).json();
+  } catch (e) {
+    return {};
+  }
 }
 
-const normT = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const normT = (s) =>
+  String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 function simT(a, b) {
-  const A = new Set(normT(a).split(" ")), B = new Set(normT(b).split(" "));
+  const A = new Set(normT(a).split(" ")),
+    B = new Set(normT(b).split(" "));
   let hit = 0;
   A.forEach((w) => B.has(w) && hit++);
   return hit / Math.max(A.size, B.size, 1);
@@ -130,7 +156,8 @@ function simT(a, b) {
 
 async function mapToTmdb(rawId, mediaType, season, episode, dbg) {
   const id = String(rawId);
-  if (/^\d+$/.test(id)) return { id, type: mediaType === "movie" ? "movie" : "tv", season, episode };
+  if (/^\d+$/.test(id))
+    return { id, type: mediaType === "movie" ? "movie" : "tv", season, episode };
 
   const imdb = /^(tt\d+)/.exec(id);
   if (imdb) {
@@ -144,24 +171,35 @@ async function mapToTmdb(rawId, mediaType, season, episode, dbg) {
   const k = /^kitsu:(\d+)(?::(\d+))?/.exec(id);
   if (k) {
     let ep = Number(episode) || Number(k[2]) || 1;
-    const kj = await (await fetch(`https://kitsu.io/api/edge/anime/${k[1]}`, {
-      headers: { Accept: "application/vnd.api+json" },
-    })).json();
+    const kj = await (
+      await fetch(`https://kitsu.io/api/edge/anime/${k[1]}`, {
+        headers: { Accept: "application/vnd.api+json" },
+      })
+    ).json();
     const at = (kj.data && kj.data.attributes) || {};
-    const titles = [at.titles && at.titles.en, at.canonicalTitle, at.titles && at.titles.en_jp]
-      .filter(Boolean);
+    const titles = [at.titles && at.titles.en, at.canonicalTitle, at.titles && at.titles.en_jp].filter(
+      Boolean
+    );
     if (!titles.length) return null;
     dbg.push("kitsu=" + titles[0]);
 
     const isMovie = at.subtype === "movie" || mediaType === "movie";
-    const clean = (t) => t.replace(/\b(\d+)(st|nd|rd|th) season\b/gi, " ").replace(/\bseason\s*\d+\b/gi, " ")
-      .replace(/\bpart\s*\d+\b/gi, " ").replace(/\s+/g, " ").trim();
+    const clean = (t) =>
+      t
+        .replace(/\b(\d+)(st|nd|rd|th) season\b/gi, " ")
+        .replace(/\bseason\s*\d+\b/gi, " ")
+        .replace(/\bpart\s*\d+\b/gi, " ")
+        .replace(/\s+/g, " ")
+        .trim();
     let best = null;
     for (const t of titles) {
       const q = clean(t);
       const r = await tmdbGet(`search/${isMovie ? "movie" : "tv"}?query=${encodeURIComponent(q)}`);
       (r.results || []).slice(0, 6).forEach((x) => {
-        const sc = Math.max(simT(q, x.name || x.title), simT(q, x.original_name || x.original_title));
+        const sc = Math.max(
+          simT(q, x.name || x.title),
+          simT(q, x.original_name || x.original_title)
+        );
         if (!best || sc > best.sc) best = { id: x.id, sc };
       });
       if (best && best.sc >= 0.8) break;
@@ -171,7 +209,9 @@ async function mapToTmdb(rawId, mediaType, season, episode, dbg) {
 
     // which TMDB season? read it from the Kitsu title ("2nd Season", "Season 3"...)
     let sn = 1;
-    const sm = titles.map((t) => /(\d+)(?:st|nd|rd|th) season|season\s*(\d+)/i.exec(t)).filter(Boolean)[0];
+    const sm = titles
+      .map((t) => /(\d+)(?:st|nd|rd|th) season|season\s*(\d+)/i.exec(t))
+      .filter(Boolean)[0];
     if (sm) sn = parseInt(sm[1] || sm[2], 10);
     const det = await tmdbGet(`tv/${best.id}`);
     const seasons = (det.seasons || []).filter((x) => x.season_number > 0);
@@ -179,7 +219,11 @@ async function mapToTmdb(rawId, mediaType, season, episode, dbg) {
     if (!sm) {
       let left = ep;
       for (const x of seasons) {
-        if (left <= x.episode_count) { sn = x.season_number; ep = left; break; }
+        if (left <= x.episode_count) {
+          sn = x.season_number;
+          ep = left;
+          break;
+        }
         left -= x.episode_count;
       }
     }
@@ -191,7 +235,14 @@ async function mapToTmdb(rawId, mediaType, season, episode, dbg) {
 // ---------- entry point ----------
 async function getStreams(tmdbId, mediaType, season, episode) {
   const dbg = [];
-  const fail = (m) => [{ name: "DEBUG " + dbg.concat(m).join(" > ").slice(0, 500), title: dbg.concat(m).join(" > "), url: "https://debug.invalid/", quality: "debug" }];
+  const fail = (m) => [
+    {
+      name: "DEBUG " + dbg.concat(m).join(" > ").slice(0, 500),
+      title: dbg.concat(m).join(" > "),
+      url: "https://debug.invalid/",
+      quality: "debug",
+    },
+  ];
   try {
     const m = await mapToTmdb(tmdbId, mediaType, Number(season) || 1, Number(episode) || 1, dbg);
     if (!m) return fail("could not map id " + tmdbId);
@@ -207,7 +258,9 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
       let masterText = src.master;
       if (!masterText) {
-        try { masterText = await (await fetch(src.url, { headers: PLAY_HEADERS })).text(); } catch (e) {}
+        try {
+          masterText = await (await fetch(src.url, { headers: PLAY_HEADERS })).text();
+        } catch (e) {}
       }
       const parsed = masterText ? parseMaster(masterText, src.url, key) : { media: [], variants: [] };
       const max = parsed.variants.length ? parsed.variants[0].height : 0;
@@ -217,22 +270,35 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         name: "Redflix",
         title: server + " (master)",
         url: src.url,
-        quality: max ? "Auto (up to " + qualityLabel(max) + ")" : (src.quality || "Auto"),
+        quality: max ? "Auto (up to " + qualityLabel(max) + ")" : src.quality || "Auto",
         headers: PLAY_HEADERS,
         provider: "redflix",
       });
-      // 2) each quality as a direct playlist link. Audio is a separate track in
-      //    this HLS set, so these may be silent in some players.
-      parsed.variants.forEach((v) =>
-        streams.push({
-          name: "Redflix",
-          title: server + " (" + qualityLabel(v.height) + " direct)",
-          url: v.url,
-          quality: qualityLabel(v.height),
-          headers: PLAY_HEADERS,
-          provider: "redflix",
-        })
-      );
+
+      // 2) per-quality self-contained master (keeps #EXT-X-MEDIA audio & subs intact)
+      if (parsed.media.length && parsed.variants.length) {
+        parsed.variants.forEach((v) =>
+          streams.push({
+            name: "Redflix",
+            title: server + " (" + qualityLabel(v.height) + ")",
+            url: singleQualityMaster(parsed, v),
+            quality: qualityLabel(v.height),
+            headers: PLAY_HEADERS,
+            provider: "redflix",
+          })
+        );
+      } else {
+        parsed.variants.forEach((v) =>
+          streams.push({
+            name: "Redflix",
+            title: server + " (" + qualityLabel(v.height) + " direct)",
+            url: v.url,
+            quality: qualityLabel(v.height),
+            headers: PLAY_HEADERS,
+            provider: "redflix",
+          })
+        );
+      }
     }
     return streams.length ? streams : fail("empty sources");
   } catch (e) {
