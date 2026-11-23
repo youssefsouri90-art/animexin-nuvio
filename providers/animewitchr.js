@@ -20,57 +20,6 @@ function normAscii(s) {
     .trim();
 }
 
-function tokenSimilarity(a, b) {
-  const na = normAscii(a);
-  const nb = normAscii(b);
-  if (!na || !nb) return 0;
-  if (na === nb) return 1;
-
-  const wa = na.split(" ").filter(Boolean);
-  const wb = nb.split(" ").filter(Boolean);
-  const setA = new Set(wa);
-  const setB = new Set(wb);
-
-  let common = 0;
-  setA.forEach(function (w) {
-    if (setB.has(w)) common++;
-  });
-
-  const jaccard = common / Math.max(setA.size, setB.size, 1);
-  // جزاء بسيط إذا كان المرشح أطول بكثير بكلمات إضافية مثل shippuuden أو movie أو next generations
-  const extraPenalty = Math.max(0, setB.size - setA.size) * 0.12;
-  return Math.max(0, jaccard - extraPenalty);
-}
-
-const ROMAN = { 2: "ii", 3: "iii", 4: "iv", 5: "v", 6: "vi" };
-
-function seasonScoreAdjustment(names, season) {
-  const s = Number(season) || 1;
-  const joined = " " + names.map(normAscii).join(" | ") + " ";
-
-  const hasShippuuden = joined.indexOf(" shippuuden ") >= 0 || joined.indexOf(" shippuden ") >= 0;
-  const hasSeason2Plus =
-    joined.indexOf(" season 2 ") >= 0 ||
-    joined.indexOf(" 2nd season ") >= 0 ||
-    joined.indexOf(" ii ") >= 0;
-
-  if (s <= 1) {
-    if (hasShippuuden || hasSeason2Plus) return -0.35;
-    return 0.15;
-  }
-
-  const ord = s + (s === 2 ? "nd" : s === 3 ? "rd" : "th");
-  if (
-    joined.indexOf(" season " + s + " ") >= 0 ||
-    joined.indexOf(" " + ord + " season ") >= 0 ||
-    (ROMAN[s] && joined.indexOf(" " + ROMAN[s] + " ") >= 0) ||
-    (s === 2 && hasShippuuden)
-  ) {
-    return 0.35;
-  }
-  return 0;
-}
-
 function firestoreDocUrl(docPath) {
   return (
     "https://firestore.googleapis.com/v1/projects/" +
@@ -192,26 +141,100 @@ function extractAnimeId(hit) {
   return hit.objectID ? String(hit.objectID) : "";
 }
 
-function collectHitNames(hit) {
+function collectHitInfo(hit) {
   const names = [];
-  if (!hit || typeof hit !== "object") return names;
   const id = extractAnimeId(hit);
   if (id) names.push(id);
   if (hit.objectID) names.push(String(hit.objectID));
+
   if (Array.isArray(hit.search_names)) {
     hit.search_names.forEach(function (n) {
       if (n) names.push(n);
     });
   }
   if (hit.alternative_titles && typeof hit.alternative_titles === "object") {
-    Object.keys(hit.alternative_titles).forEach(function (k) {
+    ["en", "ja", "romaji", "title"].forEach(function (k) {
       if (hit.alternative_titles[k]) names.push(hit.alternative_titles[k]);
     });
+    if (Array.isArray(hit.alternative_titles.synonyms)) {
+      hit.alternative_titles.synonyms.forEach(function (s) {
+        if (s) names.push(s);
+      });
+    }
   }
   if (hit.details && hit.details.english_title) {
     names.push(hit.details.english_title);
   }
-  return names;
+
+  const epsText = String((hit.details && hit.details.eps_num) || "");
+  const isZeroEps = /^\s*0\s*حلقة/.test(epsText);
+
+  return {
+    id: id,
+    names: names,
+    isZeroEps: isZeroEps,
+  };
+}
+
+function scoreCandidate(tmdbTitles, cand, season) {
+  const s = Number(season) || 1;
+  const normNames = cand.names.map(normAscii).filter(Boolean);
+  const joined = " " + normNames.join(" | ") + " ";
+
+  let bestMatch = 0;
+  tmdbTitles.forEach(function (t) {
+    const nt = normAscii(t);
+    if (!nt) return;
+    const tTokens = nt.split(" ").filter(function (w) {
+      return w.length > 2;
+    });
+
+    normNames.forEach(function (nn) {
+      if (nn === nt) {
+        bestMatch = Math.max(bestMatch, 1.0);
+      } else if (nn.indexOf(nt) !== -1 || nt.indexOf(nn) !== -1) {
+        bestMatch = Math.max(bestMatch, 0.85);
+      } else if (tTokens.length) {
+        let matched = 0;
+        tTokens.forEach(function (tok) {
+          if ((" " + nn + " ").indexOf(" " + tok + " ") !== -1) matched++;
+        });
+        const ratio = matched / tTokens.length;
+        bestMatch = Math.max(bestMatch, ratio * 0.8);
+      }
+    });
+  });
+
+  if (bestMatch <= 0) return -1;
+
+  let score = bestMatch;
+  if (cand.isZeroEps) score -= 0.6;
+
+  const isSeason2 =
+    joined.indexOf(" 2nd season ") !== -1 ||
+    joined.indexOf(" season 2 ") !== -1 ||
+    joined.indexOf(" 第2期 ") !== -1;
+  const isSeason3Plus =
+    joined.indexOf(" 3rd season ") !== -1 ||
+    joined.indexOf(" season 3 ") !== -1 ||
+    joined.indexOf(" season 4 ") !== -1 ||
+    joined.indexOf(" golden land ") !== -1;
+
+  if (s <= 1) {
+    if (isSeason2 || isSeason3Plus) score -= 0.45;
+    else score += 0.15;
+  } else if (s === 2) {
+    if (isSeason2) score += 0.45;
+    else score -= 0.25;
+  } else if (s >= 3) {
+    if (isSeason3Plus || joined.indexOf(" season " + s + " ") !== -1) {
+      score += 0.45;
+    } else {
+      score -= 0.25;
+    }
+  }
+
+  return score;
 }
 
 async function resolveMatchedAnimeId(id, mediaType, season) {
@@ -224,33 +247,27 @@ async function resolveMatchedAnimeId(id, mediaType, season) {
   const titles = await getTmdbTitles(raw, mediaType);
   if (!titles.length) return null;
 
-  const queries = titles.slice(0, 3);
   const pool = {};
+  const queries = titles.slice(0, 3);
 
   for (let i = 0; i < queries.length; i++) {
     const hits = await queryAlgoliaSeries(queries[i]);
     hits.forEach(function (h) {
-      const aid = extractAnimeId(h);
-      if (!aid) return;
-      if (!pool[aid]) pool[aid] = { id: aid, names: [] };
-      pool[aid].names = pool[aid].names.concat(collectHitNames(h));
+      const info = collectHitInfo(h);
+      if (!info.id) return;
+      if (!pool[info.id]) {
+        pool[info.id] = { id: info.id, names: [], isZeroEps: info.isZeroEps };
+      }
+      pool[info.id].names = pool[info.id].names.concat(info.names);
+      if (info.isZeroEps) pool[info.id].isZeroEps = true;
     });
   }
 
   let best = null;
   Object.keys(pool).forEach(function (aid) {
-    const cand = pool[aid];
-    let score = 0;
-    titles.forEach(function (t) {
-      cand.names.forEach(function (nm) {
-        score = Math.max(score, tokenSimilarity(t, nm));
-      });
-    });
-    if (mediaType !== "movie") {
-      score += seasonScoreAdjustment(cand.names, season);
-    }
-    if (!best || score > best.score) {
-      best = { id: aid, score: score };
+    const sc = scoreCandidate(titles, pool[aid], season);
+    if (sc > 0 && (!best || sc > best.score)) {
+      best = { id: aid, score: sc };
     }
   });
 
@@ -263,12 +280,16 @@ function pickEpisodeDocId(episodes, episodeNum) {
   const target = Number(episodeNum) || 1;
   const padded = String(target).padStart(3, "0");
 
-  const exact = episodes.find(function (ep) {
+  const exactDoc = episodes.find(function (ep) {
     if (!ep || !ep.doc_id) return false;
     const d = String(ep.doc_id).trim();
-    return d === padded || d === String(target) || String(Number(d)) === String(target);
+    return (
+      d === padded ||
+      d === String(target) ||
+      String(Number(d)) === String(target)
+    );
   });
-  if (exact) return String(exact.doc_id);
+  if (exactDoc) return String(exactDoc.doc_id);
 
   const byName = episodes.find(function (ep) {
     if (!ep || !ep.doc_id) return false;
