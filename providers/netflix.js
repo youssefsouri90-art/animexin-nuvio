@@ -91,7 +91,7 @@
   }
 
   function withTimeout(promise, ms) {
-    var timeoutMs = ms || 6000;
+    var timeoutMs = ms || 4000;
     if (typeof setTimeout !== "function") return promise;
     return Promise.race([
       promise,
@@ -156,14 +156,14 @@
           body: "g-recaptcha-response=" + encodeURIComponent(generateUuid()),
           redirect: "manual"
         }),
-        6000
+        4000
       );
 
       var setCookieStr = extractSetCookieString(res);
       var token = parseTHashCookie(setCookieStr);
 
       if (!token && res && typeof res.text === "function") {
-        var bodyTxt = await withTimeout(res.text(), 4000).catch(function () { return ""; });
+        var bodyTxt = await withTimeout(res.text(), 2500).catch(function () { return ""; });
         token = parseTHashCookie(bodyTxt);
       }
 
@@ -205,9 +205,9 @@
         headers: headers || {}
       };
       if (body !== undefined) opts.body = body;
-      var res = await withTimeout(fetch(url, opts), ms || 6000);
+      var res = await withTimeout(fetch(url, opts), ms || 4000);
       if (!res || !res.ok) return null;
-      var text = await withTimeout(res.text(), ms || 6000);
+      var text = await withTimeout(res.text(), ms || 4000);
       try {
         return JSON.parse(text);
       } catch (e) {
@@ -236,7 +236,7 @@
         continue;
       }
       if (!domain) continue;
-      var json = await fetchJson(domain + "/checknewtv.php", headers, 4000);
+      var json = await fetchJson(domain + "/checknewtv.php", headers, 2500);
       if (json && json.token_hash && String(json.token_hash).trim()) {
         try {
           var resolved = base64Decode(String(json.token_hash).trim()).replace(/\/+$/, "");
@@ -265,7 +265,7 @@
         "user-agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0 /OS.Gatu v1.0"
       },
-      5000
+      3500
     );
     if (json && json.usertoken) {
       cacheSet(cacheKey, json.usertoken);
@@ -291,6 +291,95 @@
       });
     }
     return out;
+  }
+
+  function resolvePlaylistUri(baseUrl, uri) {
+    var u = String(uri || "").trim();
+    if (!u) return "";
+    if (/^https?:\/\/[^/]+/i.test(u)) return u;
+    if (/^https?:\/\/\/+/i.test(u)) {
+      try {
+        var parsed = new URL(baseUrl);
+        return parsed.origin + "/" + u.replace(/^https?:\/\/\/+/i, "");
+      } catch (_) {
+        return "";
+      }
+    }
+    try {
+      return new URL(u, baseUrl).href;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function formatQualityLabel(resStr, bwStr) {
+    var m = String(resStr || "").match(/(\d+)x(\d+)/i);
+    if (m) {
+      var h = parseInt(m[2], 10);
+      if (h >= 2160) return "4K (" + resStr + ")";
+      if (h >= 1080) return "1080p (" + resStr + ")";
+      if (h >= 720) return "720p (" + resStr + ")";
+      if (h >= 480) return "480p (" + resStr + ")";
+      return h + "p (" + resStr + ")";
+    }
+    var bw = parseInt(bwStr || "0", 10);
+    if (bw > 0) return Math.round(bw / 1000) + "kbps";
+    return "Auto";
+  }
+
+  async function expandM3u8Variants(masterUrl, headers, titleLabel, subtitles) {
+    var baseStream = {
+      name: "Netflix (NetMirror)",
+      title: titleLabel,
+      url: masterUrl,
+      quality: "Auto",
+      headers: headers,
+      subtitles: subtitles
+    };
+
+    try {
+      var res = await withTimeout(fetch(masterUrl, { headers: headers }), 3000);
+      if (!res || !res.ok) return [baseStream];
+      var text = await withTimeout(res.text(), 3000);
+      if (!text || text.indexOf("#EXT-X-STREAM-INF") === -1) return [baseStream];
+
+      var lines = text.split(/\r?\n/);
+      var variants = [];
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (line.indexOf("#EXT-X-STREAM-INF:") === 0) {
+          var resMatch = line.match(/RESOLUTION=([^\s,]+)/i);
+          var bwMatch = line.match(/BANDWIDTH=(\d+)/i);
+          var nextUri = "";
+          for (var j = i + 1; j < lines.length; j++) {
+            var cand = lines[j].trim();
+            if (cand && cand.charAt(0) !== "#") {
+              nextUri = cand;
+              i = j;
+              break;
+            }
+          }
+          var resolvedUrl = resolvePlaylistUri(masterUrl, nextUri);
+          if (resolvedUrl && /^https?:\/\//i.test(resolvedUrl)) {
+            variants.push({
+              name: "Netflix (NetMirror)",
+              title: titleLabel,
+              url: resolvedUrl,
+              quality: formatQualityLabel(resMatch ? resMatch[1] : "", bwMatch ? bwMatch[1] : ""),
+              headers: headers,
+              subtitles: subtitles
+            });
+          }
+        }
+      }
+
+      if (variants.length > 0) {
+        variants.unshift(baseStream);
+        return variants;
+      }
+    } catch (_) {}
+
+    return [baseStream];
   }
 
   function normalizeText(str) {
@@ -323,36 +412,38 @@
 
     var endpoint = kind === "movie" ? "movie" : "tv";
     var base = "https://api.themoviedb.org/3/" + endpoint + "/" + tmdbId;
-    var results = await Promise.all([
-      fetchJson(base + "?api_key=" + TMDB_API_KEY + "&language=en-US", {}, 4000),
-      fetchJson(base + "?api_key=" + TMDB_API_KEY + "&language=ar-SA", {}, 4000),
-      fetchJson(base + "/alternative_titles?api_key=" + TMDB_API_KEY, {}, 4000)
-    ]);
-
-    var enData = results[0] || {};
-    var arData = results[1] || {};
-    var altData = results[2] || {};
+    var enData = (await fetchJson(base + "?api_key=" + TMDB_API_KEY + "&language=en-US", {}, 3000)) || {};
     var titles = [];
 
     pushUniqueTitle(titles, enData.title);
     pushUniqueTitle(titles, enData.name);
     pushUniqueTitle(titles, enData.original_title);
     pushUniqueTitle(titles, enData.original_name);
-    pushUniqueTitle(titles, arData.title);
-    pushUniqueTitle(titles, arData.name);
 
-    var altList = altData.titles || altData.results || [];
-    for (var i = 0; i < altList.length; i++) {
-      pushUniqueTitle(titles, altList[i] && altList[i].title);
-      pushUniqueTitle(titles, altList[i] && altList[i].name);
-    }
-
-    var dateStr = enData.release_date || enData.first_air_date || arData.release_date || arData.first_air_date || "";
+    var dateStr = enData.release_date || enData.first_air_date || "";
     var year = dateStr ? Number(dateStr.slice(0, 4)) : null;
 
-    var out = { titles: titles, year: year };
+    var out = { titles: titles, year: year, base: base };
     tmdbCache[cacheKey] = out;
     return out;
+  }
+
+  async function fetchAltTitles(meta) {
+    if (!meta || !meta.base || meta._altLoaded) return;
+    meta._altLoaded = true;
+    var results = await Promise.all([
+      fetchJson(meta.base + "?api_key=" + TMDB_API_KEY + "&language=ar-SA", {}, 2500),
+      fetchJson(meta.base + "/alternative_titles?api_key=" + TMDB_API_KEY, {}, 2500)
+    ]);
+    var arData = results[0] || {};
+    var altData = results[1] || {};
+    pushUniqueTitle(meta.titles, arData.title);
+    pushUniqueTitle(meta.titles, arData.name);
+    var altList = altData.titles || altData.results || [];
+    for (var i = 0; i < altList.length; i++) {
+      pushUniqueTitle(meta.titles, altList[i] && altList[i].title);
+      pushUniqueTitle(meta.titles, altList[i] && altList[i].name);
+    }
   }
 
   function scoreSearchItem(item, queryTitles, year) {
@@ -388,15 +479,19 @@
     return score;
   }
 
-  async function searchNetflix(queryTitles, year) {
+  async function searchNetflix(meta) {
     var cookie = await bypassCookie(false);
+    var queryTitles = meta.titles;
 
     for (var i = 0; i < queryTitles.length; i++) {
+      if (i === 1 && meta.base) {
+        await fetchAltTitles(meta);
+      }
       var q = String(queryTitles[i] || "").trim();
       if (!q) continue;
 
       var url = BASE_URL + "/mobile/search.php?s=" + encodeURIComponent(q) + "&t=" + Date.now();
-      var json = await fetchJson(url, buildNfHeaders(cookie), 5000);
+      var json = await fetchJson(url, buildNfHeaders(cookie), 3500);
 
       var isTop = json && String(json.head || "").toLowerCase().indexOf("top searches") !== -1;
       if (isTop && cookie) {
@@ -404,7 +499,7 @@
         json = await fetchJson(
           BASE_URL + "/mobile/search.php?s=" + encodeURIComponent(q) + "&t=" + Date.now(),
           buildNfHeaders(cookie),
-          5000
+          3500
         );
         isTop = json && String(json.head || "").toLowerCase().indexOf("top searches") !== -1;
       }
@@ -415,7 +510,7 @@
       var best = null;
       var bestScore = 0;
       for (var j = 0; j < list.length; j++) {
-        var sc = scoreSearchItem(list[j], queryTitles, year);
+        var sc = scoreSearchItem(list[j], queryTitles, meta.year);
         if (sc > bestScore) {
           bestScore = sc;
           best = list[j];
@@ -450,7 +545,7 @@
           "&t=" +
           Date.now() +
           "&page=1";
-        var sJson = await fetchJson(epUrl, buildNfHeaders(cookie), 5000);
+        var sJson = await fetchJson(epUrl, buildNfHeaders(cookie), 3500);
         if (sJson && Array.isArray(sJson.episodes) && sJson.episodes.length > 0) {
           episodes = sJson.episodes;
         }
@@ -483,7 +578,7 @@
           "X-Requested-With": "NetmirrorNewTV v1.0",
           "User-Agent": NEWTV_UA
         },
-        5500
+        4000
       );
     }
 
@@ -506,7 +601,7 @@
       var queryTitles = meta.titles.length ? meta.titles : [String(tmdbId || "")];
       if (!queryTitles.length || !queryTitles[0]) return [];
 
-      var found = await searchNetflix(queryTitles, meta.year);
+      var found = await searchNetflix(meta);
       if (!found || !found.id) return [];
 
       var postId = String(found.id);
@@ -515,7 +610,7 @@
 
       if (kind !== "movie") {
         var postUrl = BASE_URL + "/mobile/post.php?id=" + encodeURIComponent(postId) + "&t=" + Date.now();
-        var postData = await fetchJson(postUrl, buildNfHeaders(cookie), 5000);
+        var postData = await fetchJson(postUrl, buildNfHeaders(cookie), 3500);
         if (postData) {
           targetId = await resolveEpisodeId(postData, postId, season || 1, episode || 1, cookie);
         }
@@ -532,20 +627,18 @@
         titleLabel += " S" + String(season || 1) + "E" + String(episode || 1);
       }
 
-      return [
-        {
-          name: "Netflix (NetMirror)",
-          title: titleLabel,
-          url: String(playerJson.video_link).trim(),
-          quality: "Auto",
-          headers: {
-            "Referer": playerJson.referer || (BASE_URL + "/"),
-            "Origin": BASE_URL,
-            "User-Agent": PLAY_UA
-          },
-          subtitles: parseSubtitles(playerJson)
-        }
-      ];
+      var streamHeaders = {
+        "Referer": playerJson.referer || (BASE_URL + "/"),
+        "Origin": BASE_URL,
+        "User-Agent": PLAY_UA
+      };
+
+      return await expandM3u8Variants(
+        String(playerJson.video_link).trim(),
+        streamHeaders,
+        titleLabel,
+        parseSubtitles(playerJson)
+      );
     } catch (e) {
       return [];
     }
