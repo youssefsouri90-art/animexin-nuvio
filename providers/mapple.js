@@ -194,7 +194,7 @@ function solvePow(challenge, difficulty, maxIter) {
   return -1;
 }
 
-// ================= Mapple provider =================
+// ================= Mapple provider (streams only) =================
 const BASE = "https://mapple.fun";
 const TMDB_API_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
 const UA = {
@@ -216,14 +216,7 @@ const BROWSER = Object.assign({}, UA, {
 
 const SOURCES = ["mapple", "s28", "s25", "s27", "s19", "s16", "s1", "s8", "s2", "s3", "s4", "s9", "s10", "s12", "s6", "s7"];
 const MAX_OK = 6;
-const SITE_SUBS = true;
 const PROBE = false;
-
-// SubDL API configuration
-const SUBDL_API = "https://api.subdl.com/api/v1/subtitles";
-const SUBDL_DL_BASE = "https://dl.subdl.com";
-const SUBDL_API_KEY = "subdl_EMEpuxKwQRCDcVQSAwedNMvnhbDK0QiTH1Hj0Vuh2fo";
-const SUBDL_LANGS = ["AR", "EN"];
 
 const DIAG = [];
 
@@ -388,214 +381,6 @@ async function resolveMediaId(rawId, mediaType, season, episode) {
   return null;
 }
 
-// ---------- SubDL subtitles + ZIP extraction ----------
-function subdlLangCode(value) {
-  var s = String(value || "").toLowerCase().replace(/_/g, "-");
-  if (s === "ar" || s === "arabic" || s === "ara" || s.indexOf("ar-") === 0) return "ar";
-  if (s === "en" || s === "english" || s === "eng" || s.indexOf("en-") === 0) return "en";
-  return s.slice(0, 2);
-}
-
-function utf8ToBase64(str) {
-  var bytes = [];
-  for (var i = 0; i < str.length; i++) {
-    var c = str.charCodeAt(i);
-    if (c < 0x80) {
-      bytes.push(c);
-    } else if (c < 0x800) {
-      bytes.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
-    } else if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
-      var c2 = str.charCodeAt(++i);
-      var cp = 0x10000 + (((c & 0x3ff) << 10) | (c2 & 0x3ff));
-      bytes.push(
-        0xf0 | (cp >> 18),
-        0x80 | ((cp >> 12) & 0x3f),
-        0x80 | ((cp >> 6) & 0x3f),
-        0x80 | (cp & 0x3f)
-      );
-    } else {
-      bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
-    }
-  }
-  var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  var out = "";
-  for (var j = 0; j < bytes.length; j += 3) {
-    var b0 = bytes[j];
-    var b1 = j + 1 < bytes.length ? bytes[j + 1] : 0;
-    var b2 = j + 2 < bytes.length ? bytes[j + 2] : 0;
-    var n = (b0 << 16) | (b1 << 8) | b2;
-    out += chars[(n >> 18) & 63] + chars[(n >> 12) & 63];
-    out += j + 1 < bytes.length ? chars[(n >> 6) & 63] : "=";
-    out += j + 2 < bytes.length ? chars[n & 63] : "=";
-  }
-  return out;
-}
-
-function srtToVtt(rawText) {
-  var clean = String(rawText || "").replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
-  if (!clean) return "";
-  if (clean.indexOf("WEBVTT") === 0) return clean;
-  var fixed = clean.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, "$1.$2");
-  return "WEBVTT\n\n" + fixed;
-}
-
-function decodeBytes(bytes) {
-  try {
-    if (typeof TextDecoder !== "undefined") {
-      return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-    }
-  } catch (e) {}
-  var out = "";
-  for (var i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
-  return out;
-}
-
-async function inflateRawBytes(bytes) {
-  if (typeof DecompressionStream !== "undefined") {
-    try {
-      var ds = new DecompressionStream("deflate-raw");
-      var writer = ds.writable.getWriter();
-      writer.write(bytes);
-      writer.close();
-      var buf = await new Response(ds.readable).arrayBuffer();
-      return new Uint8Array(buf);
-    } catch (e) {}
-  }
-  return null;
-}
-
-async function extractSubtitleDataUrlFromZip(zipUrl) {
-  try {
-    var r = await withTimeout(fetch(zipUrl, { headers: { "User-Agent": "Nuvio Mapple Provider v1.0" } }), 5000);
-    if (!r || !r.ok) return null;
-    var ab = await r.arrayBuffer();
-    var u8 = new Uint8Array(ab);
-    if (u8.length < 30 || u8[0] !== 0x50 || u8[1] !== 0x4b || u8[2] !== 0x03 || u8[3] !== 0x04) {
-      var directTxt = decodeBytes(u8);
-      if (/-->/.test(directTxt)) {
-        return "data:text/vtt;charset=utf-8;base64," + utf8ToBase64(srtToVtt(directTxt));
-      }
-      return null;
-    }
-
-    var view = new DataView(ab);
-    var pos = 0;
-    while (pos + 30 <= u8.length) {
-      if (view.getUint32(pos, true) !== 0x04034b50) break;
-      var method = view.getUint16(pos + 8, true);
-      var compSize = view.getUint32(pos + 18, true);
-      var nameLen = view.getUint16(pos + 26, true);
-      var extraLen = view.getUint16(pos + 28, true);
-      var nameStart = pos + 30;
-      var nameEnd = nameStart + nameLen;
-      var dataStart = nameEnd + extraLen;
-      var dataEnd = dataStart + compSize;
-      if (dataEnd > u8.length) break;
-
-      var fileName = decodeBytes(u8.subarray(nameStart, nameEnd)).toLowerCase();
-      var entryBytes = u8.subarray(dataStart, dataEnd);
-
-      if (/\.(srt|vtt|ass|ssa)$/i.test(fileName)) {
-        var rawEntry = null;
-        if (method === 0) {
-          rawEntry = entryBytes;
-        } else if (method === 8) {
-          rawEntry = await inflateRawBytes(entryBytes);
-        }
-        if (rawEntry) {
-          var subText = decodeBytes(rawEntry);
-          var vtt = srtToVtt(subText);
-          if (vtt) {
-            return "data:text/vtt;charset=utf-8;base64," + utf8ToBase64(vtt);
-          }
-        }
-      }
-      pos = dataEnd;
-    }
-    return null;
-  } catch (e) {
-    return null;
-  }
-}
-
-async function fetchSubdlSubtitles(id, isTv, season, episode) {
-  try {
-    var q = [
-      "api_key=" + encodeURIComponent(SUBDL_API_KEY),
-      "tmdb_id=" + encodeURIComponent(String(id)),
-      "type=" + (isTv ? "tv" : "movie"),
-      "languages=" + encodeURIComponent(SUBDL_LANGS.join(",")),
-      "subs_per_page=30",
-    ];
-    if (isTv) {
-      q.push("season_number=" + encodeURIComponent(String(Number(season) || 1)));
-      q.push("episode_number=" + encodeURIComponent(String(Number(episode) || 1)));
-    }
-    var r = await withTimeout(
-      fetch(SUBDL_API + "?" + q.join("&"), {
-        headers: {
-          Accept: "application/json",
-          Authorization: "Bearer " + SUBDL_API_KEY,
-          "X-API-Key": SUBDL_API_KEY,
-          "User-Agent": "Nuvio Mapple Provider v1.0",
-        },
-      }),
-      4500
-    );
-    if (!r || !r.ok) return [];
-    var json = await r.json();
-    var list = (json && Array.isArray(json.subtitles)) ? json.subtitles : [];
-    var perLang = {};
-    var selected = [];
-
-    for (var i = 0; i < list.length; i++) {
-      var item = list[i] || {};
-      var lang = subdlLangCode(item.language || item.lang);
-      if (lang !== "ar" && lang !== "en") continue;
-      if ((perLang[lang] || 0) >= 2) continue;
-
-      var relUrl = item.url || item.subtitle_url || item.download_url;
-      if (!relUrl) continue;
-      var fullUrl = /^https?:/i.test(relUrl)
-        ? relUrl
-        : SUBDL_DL_BASE + (relUrl[0] === "/" ? relUrl : "/" + relUrl);
-
-      perLang[lang] = (perLang[lang] || 0) + 1;
-      var relName = String(item.release_name || item.name || "").trim();
-      var baseLabel = lang === "ar" ? "Arabic (SubDL)" : "English (SubDL)";
-      var label = relName ? baseLabel + " - " + relName.slice(0, 26) : baseLabel;
-
-      selected.push({
-        url: fullUrl,
-        lang: lang,
-        language: lang,
-        label: label,
-        name: label,
-      });
-    }
-
-    selected.sort(function (a, b) {
-      if (a.lang === b.lang) return 0;
-      return a.lang === "ar" ? -1 : 1;
-    });
-
-    var resolved = await Promise.all(selected.map(async function (sub) {
-      var extracted = await extractSubtitleDataUrlFromZip(sub.url);
-      return {
-        url: extracted || sub.url,
-        lang: sub.lang,
-        language: sub.language,
-        label: sub.label,
-        name: sub.name,
-      };
-    }));
-
-    return resolved;
-  } catch (e) {
-    return [];
-  }
-}
-
 // ---------- session (cookie + request token) ----------
 function createSession() { return { cookie: "", requestToken: "" }; }
 
@@ -669,23 +454,12 @@ async function fetchSource(sess, mtoken, id, type, scope, src) {
 // ---------- HLS ----------
 async function expandHls(masterUrl, hdrs) {
   const out = [{ url: masterUrl, quality: "Auto", height: 0 }];
-  out.subtitles = [];
   try {
     const r = await fetch(masterUrl, { headers: hdrs });
     const txt = await r.text();
     if (txt.indexOf("#EXTM3U") !== 0) { DIAG.push("m3u8? " + r.status); return out; }
     if (txt.indexOf("#EXT-X-STREAM-INF") < 0) return out;
     const lines = txt.split(/\r?\n/);
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (line.indexOf("#EXT-X-MEDIA:") !== 0 || !/TYPE=SUBTITLES/i.test(line)) continue;
-      const uri = /URI="([^"]+)"/i.exec(line);
-      if (!uri) continue;
-      const lang0 = ((/LANGUAGE="([^"]+)"/i.exec(line) || [0, "und"])[1] || "und").toLowerCase();
-      const lang = lang0.length === 3 ? ({eng:"en",ara:"ar",fre:"fr",fra:"fr",spa:"es",ger:"de",deu:"de",ita:"it",por:"pt",rus:"ru",tur:"tr"}[lang0] || lang0.slice(0, 2)) : lang0.slice(0, 2);
-      const name = ((/NAME="([^"]+)"/i.exec(line) || [0, lang])[1] || lang);
-      out.subtitles.push({ url: absUrl(masterUrl, uri[1]), lang: lang, language: lang, label: name, name: name });
-    }
     const byHeight = {};
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -709,28 +483,6 @@ async function expandHls(masterUrl, hdrs) {
       hs.forEach((h) => out.push({ url: byHeight[h].url, quality: qualityLabel(h), height: h }));
     }
   } catch (e) {}
-  return out;
-}
-
-function toSubtitles(d) {
-  const raw = d && (d.subtitles || d.subtitle || d.subtitleTracks || d.captionTracks || d.tracks || d.captions);
-  const arr = Array.isArray(raw) ? raw : (raw && typeof raw === "object" ? Object.keys(raw).map((k) => raw[k]) : []);
-  const out = [];
-  (Array.isArray(arr) ? arr : []).forEach((t) => {
-    if (typeof t === "string") t = { url: t };
-    const u0 = t && (t.url || t.file || t.src || t.uri || t.path);
-    const u = u0 ? absUrl(BASE + "/", String(u0)) : "";
-    if (!u) return;
-    const label = String(t.label || t.name || t.lang || t.language || t.locale || "und");
-    const kind = String(t.kind || "").toLowerCase();
-    if (kind === "thumbnails") return;
-    const lang0 = String(t.lang || t.language || t.locale || label).toLowerCase().replace(/_/g, "-");
-    const lang = lang0.length === 3 ? ({eng:"en",ara:"ar",fre:"fr",fra:"fr",spa:"es",ger:"de",deu:"de",ita:"it",por:"pt",rus:"ru",tur:"tr"}[lang0] || lang0.slice(0, 2)) : lang0.slice(0, 2);
-    const key = u + "|" + lang;
-    if (out.some((x) => x._key === key)) return;
-    out.push({ url: u, lang: lang, language: lang, label: label, name: label, _key: key });
-  });
-  out.forEach((x) => { delete x._key; });
   return out;
 }
 
@@ -765,16 +517,12 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     const scope = isTv ? target.season + "-" + target.episode : "";
     dbg.push(type + " " + id + (scope ? " " + scope : ""));
 
-    const externalSubsPromise = fetchSubdlSubtitles(id, isTv, target.season, target.episode);
-
     const pagePath = isTv ? "/watch/tv/" + id + "-" + scope : "/watch/movie/" + id;
     const sess = await openSession(pagePath);
     if (!sess) return fail("no session");
 
     let mtoken = await getMediaToken(sess, id, type, scope);
     if (!mtoken) return fail("no media token");
-
-    const externalSubs = await externalSubsPromise;
 
     const found = [];
     for (let i = 0; i < SOURCES.length && found.length < MAX_OK; i += 8) {
@@ -799,30 +547,14 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       const su = f.data.stream_url;
       const full = absUrl(BASE + "/", su);
       const PH = Object.assign({}, UA, { Referer: BASE + "/", Origin: BASE });
-      const subs = [];
-      externalSubs.forEach((s) => {
-        if (!subs.some((x) => x.url === s.url)) subs.push(s);
-      });
-      if (SITE_SUBS) {
-        toSubtitles(f.data).forEach((s) => {
-          if (!subs.some((x) => x.url === s.url)) subs.push(s);
-        });
-      }
       const links = /m3u8|playlist/i.test(full) ? await expandHls(full, PH) : [{ url: full, quality: "Direct", height: 0 }];
-      if (SITE_SUBS && links.subtitles && links.subtitles.length) {
-        links.subtitles.forEach((s) => {
-          if (!subs.some((x) => x.url === s.url)) subs.push(s);
-        });
-      }
       links.sort((a, b) => (b.height || 0) - (a.height || 0));
       links.forEach((l) => {
         if (seen[l.url]) return;
         seen[l.url] = 1;
         const sourceQuality = f.data.quality || f.data.resolution || f.data.height;
         const q = l.quality === "Direct" && sourceQuality ? String(sourceQuality).match(/^\d+$/) ? qualityLabel(Number(sourceQuality)) : String(sourceQuality) : l.quality;
-        const st = { name: "Mapple " + f.src, title: "Mapple " + f.src, url: l.url, quality: q, headers: PH, provider: "mapple" };
-        if (subs.length) st.subtitles = subs;
-        streams.push(st);
+        streams.push({ name: "Mapple " + f.src, title: "Mapple " + f.src, url: l.url, quality: q, headers: PH, provider: "mapple" });
       });
     }
     if (PROBE) {
