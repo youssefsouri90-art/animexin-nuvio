@@ -1,3 +1,10 @@
+cd /data/data/com.termux/files/home
+rm -rf animexin-nuvio-fix
+git clone https://github.com/youssefsouri90-art/animexin-nuvio.git animexin-nuvio-fix
+cd animexin-nuvio-fix
+mkdir -p providers
+
+cat << 'EOF' > providers/animewitchr.js
 const FIREBASE_PROJECT_ID = "animewitcher-1c66d";
 const FIREBASE_API_KEY = "AIzaSyAcbWRwfFNnCpoydDXlEALWnM_TYVcJOMU";
 const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
@@ -208,7 +215,7 @@ function scoreCandidate(tmdbTitles, cand, season) {
   if (bestMatch <= 0) return -1;
 
   let score = bestMatch;
-  if (cand.isZeroEps) score -= 0.6;
+  if (cand.isZeroEps) score -= 0.7;
 
   const isSeason2 =
     joined.indexOf(" 2nd season ") !== -1 ||
@@ -221,7 +228,7 @@ function scoreCandidate(tmdbTitles, cand, season) {
     joined.indexOf(" golden land ") !== -1;
 
   if (s <= 1) {
-    if (isSeason2 || isSeason3Plus) score -= 0.45;
+    if (isSeason2 || isSeason3Plus) score -= 0.5;
     else score += 0.15;
   } else if (s === 2) {
     if (isSeason2) score += 0.45;
@@ -271,7 +278,7 @@ async function resolveMatchedAnimeId(id, mediaType, season) {
     }
   });
 
-  if (!best || best.score < 0.35) return null;
+  if (!best || best.score < 0.45) return null;
   return best.id;
 }
 
@@ -410,3 +417,9 @@ async function getStreams(id, mediaType, season, episode) {
 module.exports = {
   getStreams: getStreams,
 };
+EOF
+
+node -e 'require("./providers/animewitchr.js").getStreams("209867", "tv", 1, 1).then(r => console.log(r.map(x => x.title)))'
+git add providers/animewitchr.js
+git commit -m "Fix animewitchr matching threshold and episode resolution"
+git push
