@@ -170,10 +170,8 @@ function queryAlgoliaSeries(query) {
     "https://" +
     DEFAULT_ALGOLIA.appId +
     "-dsn.algolia.net/1/indexes/series/query";
-  const params = new URLSearchParams({
-    query: String(query || ""),
-    hitsPerPage: "10",
-  }).toString();
+  const encodedQuery = encodeURIComponent(String(query || ""));
+  const params = "query=" + encodedQuery + "&hitsPerPage=10";
 
   return fetch(url, {
     method: "POST",
