@@ -83,6 +83,18 @@
     return output;
   }
 
+  function encodeUtf8Base64(str) {
+    try {
+      if (typeof btoa === "function") {
+        return btoa(unescape(encodeURIComponent(String(str || ""))));
+      }
+    } catch (_) {}
+    if (typeof Buffer !== "undefined") {
+      return Buffer.from(String(str || ""), "utf8").toString("base64");
+    }
+    return "";
+  }
+
   function generateUuid() {
     return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
       var r = (Math.random() * 16) | 0;
@@ -274,6 +286,30 @@
     throw new Error("Failed to obtain playback usertoken");
   }
 
+  function extractAttr(line, attrName) {
+    var re = new RegExp(attrName + '=\\"([^\\"]*)\\"', "i");
+    var m = String(line || "").match(re);
+    return m && m[1] ? m[1].trim() : "";
+  }
+
+  function isArabicLabel(str) {
+    var s = String(str || "").toLowerCase();
+    return /\bar\b|arabic|ara|العربية|عربي|عربيه/.test(s) || /[\u0600-\u06ff]/.test(s);
+  }
+
+  function isOriginalAudioLine(line) {
+    var lang = extractAttr(line, "LANGUAGE").toLowerCase();
+    var name = extractAttr(line, "NAME").toLowerCase();
+    var isDefault = /DEFAULT=YES/i.test(line);
+    return (
+      isDefault ||
+      lang === "und" ||
+      lang === "orig" ||
+      lang === "original" ||
+      /original|orig|main|1\.\s*unknown/.test(name)
+    );
+  }
+
   function parseSubtitles(json) {
     var raw = json && (json.subtitles || json.subtitle || json.tracks);
     if (!Array.isArray(raw)) return [];
@@ -284,19 +320,14 @@
       var url = s.url || s.file || s.src;
       if (!url) continue;
       var label = s.label || s.name || s.language || s.lang || "Subtitle";
+      if (!isArabicLabel(label + " " + String(s.language || s.lang || ""))) continue;
       out.push({
         url: String(url),
-        language: String(s.language || s.lang || label),
+        language: String(s.language || s.lang || "ar"),
         name: String(label)
       });
     }
     return out;
-  }
-
-  function extractAttr(line, attrName) {
-    var re = new RegExp(attrName + '=\\"([^\\"]*)\\"', "i");
-    var m = String(line || "").match(re);
-    return m && m[1] ? m[1].trim() : "";
   }
 
   function resolvePlaylistUri(baseUrl, uri) {
@@ -337,23 +368,118 @@
     return "Auto";
   }
 
+  function buildCustomAutoPlaylist(m3u8Text, masterUrl) {
+    var lines = String(m3u8Text || "").split(/\r?\n/);
+    var headerLines = ["#EXTM3U"];
+    var audioLines = [];
+    var subLines = [];
+    var streamBlocks = [];
+
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (!line || line === "#EXTM3U") continue;
+
+      if (
+        line.indexOf("#EXT-X-VERSION:") === 0 ||
+        line.indexOf("#EXT-X-INDEPENDENT-SEGMENTS") === 0
+      ) {
+        headerLines.push(line);
+        continue;
+      }
+
+      if (line.indexOf("#EXT-X-MEDIA:") === 0) {
+        var type = extractAttr(line, "TYPE").toUpperCase();
+        var lang = extractAttr(line, "LANGUAGE");
+        var name = extractAttr(line, "NAME");
+        var uriAttr = extractAttr(line, "URI");
+        var fixedUri = uriAttr ? resolvePlaylistUri(masterUrl, uriAttr) : "";
+        var updatedLine = uriAttr && fixedUri ? line.replace(uriAttr, fixedUri) : line;
+
+        if (type === "AUDIO") {
+          if (isArabicLabel(lang + " " + name + " " + line) || isOriginalAudioLine(line)) {
+            if (!uriAttr || /^https?:\/\//i.test(fixedUri)) {
+              audioLines.push(updatedLine);
+            }
+          }
+        } else if (type === "SUBTITLES") {
+          if (isArabicLabel(lang + " " + name + " " + line)) {
+            if (!uriAttr || /^https?:\/\//i.test(fixedUri)) {
+              subLines.push(updatedLine);
+            }
+          }
+        }
+        continue;
+      }
+
+      if (line.indexOf("#EXT-X-STREAM-INF:") === 0) {
+        var resMatch = line.match(/RESOLUTION=(\d+)x(\d+)/i);
+        var height = resMatch ? parseInt(resMatch[2], 10) : 0;
+        var nextUri = "";
+
+        for (var j = i + 1; j < lines.length; j++) {
+          var cand = lines[j].trim();
+          if (cand && cand.charAt(0) !== "#") {
+            nextUri = cand;
+            i = j;
+            break;
+          }
+        }
+
+        var resolvedStreamUrl = resolvePlaylistUri(masterUrl, nextUri);
+        if (height === 1080 && resolvedStreamUrl && /^https?:\/\//i.test(resolvedStreamUrl)) {
+          streamBlocks.push(line);
+          streamBlocks.push(resolvedStreamUrl);
+        }
+      }
+    }
+
+    if (streamBlocks.length === 0) return "";
+
+    var playlist = headerLines
+      .concat(audioLines)
+      .concat(subLines)
+      .concat(streamBlocks)
+      .join("\n");
+
+    var b64 = encodeUtf8Base64(playlist);
+    return b64 ? "data:application/vnd.apple.mpegurl;base64," + b64 : "";
+  }
+
   async function expandM3u8Variants(masterUrl, headers, titleLabel, baseSubtitles) {
     var subtitles = Array.isArray(baseSubtitles) ? baseSubtitles.slice() : [];
-
-    var baseStream = {
-      name: "Netflix (NetMirror)",
-      title: titleLabel,
-      url: masterUrl,
-      quality: "Auto",
-      headers: headers,
-      subtitles: subtitles
-    };
+    var autoUrl = masterUrl;
 
     try {
       var res = await withTimeout(fetch(masterUrl, { headers: headers }), 3000);
-      if (!res || !res.ok) return [baseStream];
+      if (!res || !res.ok) {
+        return [
+          {
+            name: "Netflix (NetMirror)",
+            title: titleLabel,
+            url: autoUrl,
+            quality: "Auto",
+            headers: headers,
+            subtitles: subtitles
+          }
+        ];
+      }
+
       var text = await withTimeout(res.text(), 3000);
-      if (!text) return [baseStream];
+      if (!text) {
+        return [
+          {
+            name: "Netflix (NetMirror)",
+            title: titleLabel,
+            url: autoUrl,
+            quality: "Auto",
+            headers: headers,
+            subtitles: subtitles
+          }
+        ];
+      }
+
+      var customAuto = buildCustomAutoPlaylist(text, masterUrl);
+      if (customAuto) autoUrl = customAuto;
 
       var lines = text.split(/\r?\n/);
       var variants = [];
@@ -363,11 +489,16 @@
 
         if (line.indexOf("#EXT-X-MEDIA:") === 0) {
           var mediaType = extractAttr(line, "TYPE").toUpperCase();
-          var mediaName = extractAttr(line, "NAME") || extractAttr(line, "LANGUAGE") || "Subtitle";
-          var mediaLang = extractAttr(line, "LANGUAGE") || mediaName;
+          var mediaName = extractAttr(line, "NAME") || extractAttr(line, "LANGUAGE") || "Arabic";
+          var mediaLang = extractAttr(line, "LANGUAGE") || "ar";
           var mediaUri = resolvePlaylistUri(masterUrl, extractAttr(line, "URI"));
 
-          if (mediaType === "SUBTITLES" && mediaUri && /^https?:\/\//i.test(mediaUri)) {
+          if (
+            mediaType === "SUBTITLES" &&
+            mediaUri &&
+            /^https?:\/\//i.test(mediaUri) &&
+            isArabicLabel(mediaLang + " " + mediaName + " " + line)
+          ) {
             var existsSub = subtitles.some(function (s) { return s.url === mediaUri; });
             if (!existsSub) {
               subtitles.push({
@@ -426,11 +557,28 @@
         };
       });
 
-      baseStream.subtitles = subtitles;
+      var baseStream = {
+        name: "Netflix (NetMirror)",
+        title: titleLabel,
+        url: autoUrl,
+        quality: "Auto",
+        headers: headers,
+        subtitles: subtitles
+      };
+
       return cleanVariants.length > 0 ? [baseStream].concat(cleanVariants) : [baseStream];
     } catch (_) {}
 
-    return [baseStream];
+    return [
+      {
+        name: "Netflix (NetMirror)",
+        title: titleLabel,
+        url: autoUrl,
+        quality: "Auto",
+        headers: headers,
+        subtitles: subtitles
+      }
+    ];
   }
 
   function normalizeText(str) {
