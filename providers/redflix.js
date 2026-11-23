@@ -1,8 +1,9 @@
-// Redflix provider for Nuvio (Vidbolt + Vidly + Subtitles).
+// Redflix provider for Nuvio (Vidbolt + Vidly + Master Audio + Subtitles).
 const SITE = "https://redflix.ac";
 const VIDBOLT_SITE = "https://vidbolt.st";
 const VIDBOLT_API = VIDBOLT_SITE + "/api/resolve";
 const VIDLY_SITE = "https://vidly.pro";
+const SUB_API = "https://api.thesubtitledb.org/v1";
 
 const UA = {
   "User-Agent":
@@ -84,25 +85,106 @@ function parseMaster(text, baseUrl, key) {
   return { media, audioTracks, subtitles, variants };
 }
 
-function buildMasterStream(label, masterUrl, masterText, fallbackQuality, siteOrigin) {
+function formatSubUrl(rawUrl, fmt) {
+  if (!rawUrl) return "";
+  try {
+    const u = new URL(rawUrl);
+    if (u.hostname.includes("thesubtitledb.org")) {
+      u.searchParams.set("format", fmt === "srt" ? "srt" : "vtt");
+      u.searchParams.set("remove_watermark", "true");
+    }
+    return u.toString();
+  } catch (e) {
+    return rawUrl;
+  }
+}
+
+async function fetchSubtitleDbSubs(type, id, season, episode) {
+  const path = type === "movie"
+    ? `${SUB_API}/by-tmdb/movie/${id}?limit=100`
+    : `${SUB_API}/by-tmdb/tv/${id}/season/${season}/episode/${episode}?limit=100`;
+
+  const r = await getJson(path);
+  if (!r.ok || !r.json || !r.json.subtitles || !Array.isArray(r.json.subtitles.items)) {
+    return [];
+  }
+
+  const preferredLangs = ["ar", "en", "es", "fr"];
+  const items = r.json.subtitles.items.filter((x) => {
+    const lang = String(x.language || "").toLowerCase();
+    return x.download_url && preferredLangs.includes(lang);
+  });
+
+  // Score candidates: prefer srt/vtt over ass, prefer non-AI and non-HI, and prioritize Arabic/English
+  const scored = items.map((x) => {
+    const lang = String(x.language || "").toLowerCase();
+    const fmt = String(x.format || "").toLowerCase();
+    let score = 0;
+    if (lang === "ar") score += 100;
+    else if (lang === "en") score += 80;
+    else score += 40;
+
+    if (fmt === "srt") score += 30;
+    else if (fmt === "vtt") score += 25;
+    else if (fmt === "ass" || fmt === "ssa") score -= 10;
+
+    if (x.ai_transcribed) score -= 20;
+    if (x.hearing_impaired) score -= 5;
+    score += Math.min(20, Math.log10((Number(x.cues) || 1) + 1) * 6);
+    return { x, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+
+  // Pick top 2 per preferred language so the list stays clean and fast in Nuvio
+  const perLangCount = {};
+  const chosen = [];
+  for (const entry of scored) {
+    const lang = String(entry.x.language || "").toLowerCase();
+    const count = perLangCount[lang] || 0;
+    if (count >= 2) continue;
+    perLangCount[lang] = count + 1;
+
+    const relName = String(entry.x.release_name || "").trim();
+    const shortRelease = relName ? ` (${relName.slice(0, 28)})` : "";
+    const langLabel = lang === "ar" ? "Arabic" : lang === "en" ? "English" : lang.toUpperCase();
+    chosen.push({
+      url: formatSubUrl(entry.x.download_url, "vtt"),
+      lang,
+      label: `${langLabel}${shortRelease}`,
+    });
+  }
+  return chosen;
+}
+
+function buildMasterStream(label, masterUrl, masterText, fallbackQuality, siteOrigin, extraSubs) {
   const key = (/[?&]api_key=([^&]+)/.exec(masterUrl) || [])[1] || "";
   const parsed = masterText ? parseMaster(masterText, masterUrl, key) : { media: [], audioTracks: [], subtitles: [], variants: [] };
   const max = parsed.variants.length ? parsed.variants[0].height : 0;
+
+  const combinedSubs = [];
+  const seenUrls = new Set();
+  for (const s of [...parsed.subtitles, ...(extraSubs || [])]) {
+    if (!s || !s.url || seenUrls.has(s.url)) continue;
+    seenUrls.add(s.url);
+    combinedSubs.push(s);
+  }
+
   const audioInfo = parsed.audioTracks.length ? " | " + parsed.audioTracks.join(", ") : "";
-  const subInfo = parsed.subtitles.length ? " | Subs: " + parsed.subtitles.map((s) => s.label).join(", ") : "";
+  const subInfo = combinedSubs.length ? " | Subs: " + combinedSubs.map((s) => s.lang).join(", ") : "";
   return {
     name: "Redflix",
     title: label + " (Audio" + audioInfo + subInfo + ")",
     url: masterUrl,
     quality: max ? "Auto (up to " + qualityLabel(max) + ")" : (fallbackQuality || "Auto"),
     headers: playHeaders(siteOrigin),
-    subtitles: parsed.subtitles,
+    subtitles: combinedSubs,
     provider: "redflix",
   };
 }
 
 // ---------- Vidbolt ----------
-async function fetchVidbolt(type, id, season, episode) {
+async function fetchVidbolt(type, id, season, episode, extraSubs) {
   const ref = { Referer: `${VIDBOLT_SITE}/${type}/${id}?theme=E50914&autoPlay=true`, Accept: "*/*" };
   const urls = type === "movie"
     ? [`${VIDBOLT_API}?type=movie&id=${id}`]
@@ -132,13 +214,13 @@ async function fetchVidbolt(type, id, season, episode) {
         masterText = await (await fetch(src.url, { headers })).text();
       } catch (e) {}
     }
-    out.push(buildMasterStream(server, src.url, masterText, src.quality || "Auto", VIDBOLT_SITE));
+    out.push(buildMasterStream(server, src.url, masterText, src.quality || "Auto", VIDBOLT_SITE, extraSubs));
   }
   return out;
 }
 
 // ---------- Vidly ----------
-async function fetchVidly(type, id, season, episode) {
+async function fetchVidly(type, id, season, episode, extraSubs) {
   const pageUrl = type === "movie"
     ? `${VIDLY_SITE}/movie/${id}`
     : `${VIDLY_SITE}/tv/${id}/${season}/${episode}`;
@@ -166,7 +248,7 @@ async function fetchVidly(type, id, season, episode) {
       } catch (e) {
         continue;
       }
-      out.push(buildMasterStream("vidly", mUrl, masterText, "Auto", VIDLY_SITE));
+      out.push(buildMasterStream("vidly", mUrl, masterText, "Auto", VIDLY_SITE, extraSubs));
     }
     return out;
   } catch (e) {
@@ -259,12 +341,23 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     if (!m) return fail("could not map id " + tmdbId);
     dbg.push("tmdb=" + m.id + " " + m.type + " s" + m.season + "e" + m.episode);
 
-    const [vb, vl] = await Promise.all([
-      fetchVidbolt(m.type, m.id, m.season, m.episode),
-      fetchVidly(m.type, m.id, m.season, m.episode),
+    const [subs, vb, vl] = await Promise.all([
+      fetchSubtitleDbSubs(m.type, m.id, m.season, m.episode).catch(() => []),
+      fetchVidbolt(m.type, m.id, m.season, m.episode, []),
+      fetchVidly(m.type, m.id, m.season, m.episode, []),
     ]);
 
-    const streams = [...vb, ...vl];
+    const streams = [...vb, ...vl].map((st) => {
+      const merged = [];
+      const seen = new Set();
+      for (const s of [...(st.subtitles || []), ...subs]) {
+        if (!s || !s.url || seen.has(s.url)) continue;
+        seen.add(s.url);
+        merged.push(s);
+      }
+      return Object.assign({}, st, { subtitles: merged });
+    });
+
     return streams.length ? streams : fail("no streams from vidbolt/vidly");
   } catch (e) {
     return fail("ERROR " + (e && e.message));
