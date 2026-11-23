@@ -363,24 +363,26 @@
     var score = 0;
     for (var i = 0; i < queryTitles.length; i++) {
       var q = normalizeText(queryTitles[i]);
-      if (!q) continue;
+      if (!q || q.length < 2) continue;
       if (normTitle === q) score = Math.max(score, 120);
       else if (normTitle.indexOf(q) !== -1 || q.indexOf(normTitle) !== -1) {
         score = Math.max(score, 85);
       } else {
-        var tokens = q.split(" ").filter(function (t) { return t.length > 1; });
-        var hits = 0;
-        for (var k = 0; k < tokens.length; k++) {
-          if (normTitle.indexOf(tokens[k]) !== -1) hits++;
+        var tokens = q.split(" ").filter(function (t) { return t.length > 2; });
+        if (tokens.length > 0) {
+          var hits = 0;
+          for (var k = 0; k < tokens.length; k++) {
+            if ((" " + normTitle + " ").indexOf(" " + tokens[k] + " ") !== -1) hits++;
+          }
+          if (hits > 0) score = Math.max(score, Math.round((hits / tokens.length) * 70));
         }
-        if (hits > 0) score = Math.max(score, hits * 20);
       }
     }
 
     var itemYear = Number(item && (item.y || item.year));
     if (year && itemYear) {
-      if (year === itemYear) score += 20;
-      else if (Math.abs(year - itemYear) <= 1) score += 10;
+      if (year === itemYear) score += 15;
+      else if (Math.abs(year - itemYear) <= 1) score += 8;
     }
 
     return score;
@@ -420,7 +422,7 @@
         }
       }
 
-      var minRequired = isTop ? 60 : 40;
+      var minRequired = isTop ? 65 : 45;
       if (best && best.id && bestScore >= minRequired) {
         return best;
       }
@@ -492,6 +494,11 @@
     return json;
   }
 
+  function isValidStreamUrl(url) {
+    var s = String(url || "").trim();
+    return /^https?:\/\//i.test(s);
+  }
+
   async function getStreams(tmdbId, mediaType, season, episode) {
     try {
       var kind = mediaType === "movie" ? "movie" : "tv";
@@ -515,10 +522,10 @@
       }
 
       var playerJson = await fetchNewTvPlayer(targetId);
-      if ((!playerJson || !playerJson.video_link) && targetId !== postId) {
+      if ((!playerJson || !isValidStreamUrl(playerJson.video_link)) && targetId !== postId) {
         playerJson = await fetchNewTvPlayer(postId);
       }
-      if (!playerJson || !playerJson.video_link) return [];
+      if (!playerJson || !isValidStreamUrl(playerJson.video_link)) return [];
 
       var titleLabel = found.t || found.title || queryTitles[0];
       if (kind !== "movie") {
@@ -529,10 +536,11 @@
         {
           name: "Netflix (NetMirror)",
           title: titleLabel,
-          url: String(playerJson.video_link),
+          url: String(playerJson.video_link).trim(),
           quality: "Auto",
           headers: {
-            "Referer": playerJson.referer || BASE_URL,
+            "Referer": playerJson.referer || (BASE_URL + "/"),
+            "Origin": BASE_URL,
             "User-Agent": PLAY_UA
           },
           subtitles: parseSubtitles(playerJson)
