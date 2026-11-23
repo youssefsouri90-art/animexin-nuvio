@@ -12,14 +12,6 @@ const UA = {
     "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
 };
 
-function fetchWithTimeout(url, options, ms) {
-  const opts = Object.assign({}, options || {});
-  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" && !opts.signal) {
-    opts.signal = AbortSignal.timeout(ms || 8000);
-  }
-  return fetch(url, opts);
-}
-
 function normAscii(s) {
   return String(s || "")
     .toLowerCase()
@@ -85,16 +77,14 @@ function parseFirestoreDoc(doc) {
 async function getTmdbTitlesByNumericId(numId, mediaType) {
   const type = mediaType === "movie" ? "movie" : "tv";
   try {
-    const res = await fetchWithTimeout(
+    const res = await fetch(
       "https://api.themoviedb.org/3/" +
         type +
         "/" +
         numId +
         "?api_key=" +
         TMDB_KEY +
-        "&append_to_response=alternative_titles",
-      {},
-      7000
+        "&append_to_response=alternative_titles"
     );
     if (!res.ok) return [];
     const j = await res.json();
@@ -116,25 +106,57 @@ async function getTmdbTitlesByNumericId(numId, mediaType) {
   }
 }
 
+async function getMalTitlesViaAniList(malId) {
+  const cleanId = String(malId || "").replace(/^mal[:_-]?/i, "").trim();
+  if (!/^\d+$/.test(cleanId)) return [];
+  try {
+    const res = await fetch("https://graphql.anilist.co", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "User-Agent": UA["User-Agent"],
+      },
+      body: JSON.stringify({
+        query:
+          "query ($idMal: Int) { Media(idMal: $idMal, type: ANIME) { title { romaji english native } synonyms } }",
+        variables: { idMal: Number(cleanId) },
+      }),
+    });
+    if (!res.ok) return [];
+    const j = await res.json();
+    const media = j && j.data && j.data.Media;
+    if (!media) return [];
+    const t = media.title || {};
+    return dedupeTitles([
+      t.romaji,
+      t.english,
+      t.native,
+      ...(Array.isArray(media.synonyms) ? media.synonyms : []),
+    ]);
+  } catch (e) {
+    return [];
+  }
+}
+
 async function getKitsuTitles(kitsuId) {
   const cleanId = String(kitsuId || "").replace(/^kitsu[:_-]?/i, "").trim();
   if (!/^\d+$/.test(cleanId)) return [];
   try {
-    const res = await fetchWithTimeout(
+    const res = await fetch(
       "https://kitsu.io/api/edge/anime/" + encodeURIComponent(cleanId),
       {
         headers: {
           Accept: "application/vnd.api+json",
           "User-Agent": UA["User-Agent"],
         },
-      },
-      7000
+      }
     );
     if (!res.ok) return [];
     const j = await res.json();
     const attrs = (j && j.data && j.data.attributes) || {};
     const titlesObj = attrs.titles || {};
-    const titles = [
+    return dedupeTitles([
       attrs.canonicalTitle,
       titlesObj.en,
       titlesObj.en_jp,
@@ -142,8 +164,7 @@ async function getKitsuTitles(kitsuId) {
       ...(Array.isArray(attrs.abbreviatedTitles)
         ? attrs.abbreviatedTitles
         : []),
-    ];
-    return dedupeTitles(titles);
+    ]);
   } catch (e) {
     return [];
   }
@@ -153,6 +174,9 @@ async function getAnimeTitles(id, mediaType) {
   const raw = String(id || "").trim();
   if (!raw) return [];
 
+  if (/^mal[:_-]/i.test(raw)) {
+    return await getMalTitlesViaAniList(raw);
+  }
   if (/^kitsu[:_-]/i.test(raw)) {
     return await getKitsuTitles(raw);
   }
@@ -169,7 +193,10 @@ async function getAnimeTitles(id, mediaType) {
   const tmdbTitles = await getTmdbTitlesByNumericId(raw, mediaType);
   if (tmdbTitles.length) return tmdbTitles;
 
-  return await getKitsuTitles(raw);
+  const kitsuTitles = await getKitsuTitles(raw);
+  if (kitsuTitles.length) return kitsuTitles;
+
+  return await getMalTitlesViaAniList(raw);
 }
 
 async function queryAlgoliaSeries(query) {
@@ -182,20 +209,16 @@ async function queryAlgoliaSeries(query) {
     hitsPerPage: "10",
   }).toString();
 
-  const res = await fetchWithTimeout(
-    url,
-    {
-      method: "POST",
-      headers: {
-        "X-Algolia-Application-Id": DEFAULT_ALGOLIA.appId,
-        "X-Algolia-API-Key": DEFAULT_ALGOLIA.apiKey,
-        "Content-Type": "application/json; charset=UTF-8",
-        "User-Agent": UA["User-Agent"],
-      },
-      body: JSON.stringify({ params: params }),
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "X-Algolia-Application-Id": DEFAULT_ALGOLIA.appId,
+      "X-Algolia-API-Key": DEFAULT_ALGOLIA.apiKey,
+      "Content-Type": "application/json; charset=UTF-8",
+      "User-Agent": UA["User-Agent"],
     },
-    7000
-  );
+    body: JSON.stringify({ params: params }),
+  });
   if (!res.ok) return [];
   const json = await res.json();
   return (json && json.hits) || [];
@@ -386,28 +409,20 @@ function resolveDirectCandidate(rawLink) {
 
 async function verifyPlayableStream(url) {
   try {
-    let res = await fetchWithTimeout(
-      url,
-      {
-        method: "HEAD",
-        headers: UA,
-        redirect: "follow",
-      },
-      6000
-    );
+    let res = await fetch(url, {
+      method: "HEAD",
+      headers: UA,
+      redirect: "follow",
+    });
     if (res.status === 405 || res.status === 403) {
-      res = await fetchWithTimeout(
-        url,
-        {
-          method: "GET",
-          headers: {
-            "User-Agent": UA["User-Agent"],
-            Range: "bytes=0-15",
-          },
-          redirect: "follow",
+      res = await fetch(url, {
+        method: "GET",
+        headers: {
+          "User-Agent": UA["User-Agent"],
+          Range: "bytes=0-15",
         },
-        6000
-      );
+        redirect: "follow",
+      });
     }
     const ct = (res.headers.get("content-type") || "").toLowerCase();
     const isMedia =
@@ -429,10 +444,8 @@ async function getStreams(id, mediaType, season, episode) {
     if (!animeId) return [];
 
     const cleanAnime = encodeURIComponent(animeId);
-    const epRes = await fetchWithTimeout(
-      firestoreDocUrl("anime_list/" + cleanAnime + "/episodes_summery/summery"),
-      {},
-      7000
+    const epRes = await fetch(
+      firestoreDocUrl("anime_list/" + cleanAnime + "/episodes_summery/summery")
     );
     if (!epRes.ok) return [];
 
@@ -441,16 +454,14 @@ async function getStreams(id, mediaType, season, episode) {
     const epDocId = pickEpisodeDocId(episodes, epNum);
     if (!epDocId) return [];
 
-    const srvRes = await fetchWithTimeout(
+    const srvRes = await fetch(
       firestoreDocUrl(
         "anime_list/" +
           cleanAnime +
           "/episodes/" +
           encodeURIComponent(epDocId) +
           "/servers2/all_servers"
-      ),
-      {},
-      7000
+      )
     );
     if (!srvRes.ok) return [];
 
