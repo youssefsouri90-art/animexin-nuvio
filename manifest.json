@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
-  "version": "2.3.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, anime3rb.com, animewitcher.com), Netflix streams (net52.cc), and movies & TV (cinema.army, mapple, redflix)",
+  "version": "2.4.0",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, ani.pm, anime3rb.com, animewitcher.com), Netflix streams (net52.cc), and movies & TV (cinema.army, mapple, redflix)",
   "scrapers": [
     {
       "id": "animexin",
@@ -35,6 +35,18 @@
       "filename": "providers/anichi.js",
       "enabled": true,
       "formats": ["hls", "mp4"]
+    },
+    {
+      "id": "anipm",
+      "name": "Ani.Pm",
+      "description": "Anime from ani.pm: Sub/Dub/HardSub 1080p with multi-language subtitles, plus Multi-Dub HLS",
+      "version": "1.1.0",
+      "author": "you",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/anipm.js",
+      "enabled": true,
+      "formats": ["hls"],
+      "contentLanguage": ["en", "ja"]
     },
     {
       "id": "cinemaarmy",
