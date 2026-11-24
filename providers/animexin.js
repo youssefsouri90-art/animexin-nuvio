@@ -214,25 +214,10 @@ async function expandHls(masterUrl, hdrs) {
     const txt = await getText(masterUrl, hdrs);
     if (txt.indexOf("#EXTM3U") !== 0) DIAG.push("master?" + txt.length + ":" + txt.slice(0, 30).replace(/\s+/g, " "));
     const lines = txt.split(/\r?\n/);
-
-    // Some HLS sources carry audio in a separate rendition playlist. A child
-    // video playlist can then be silent when opened by itself. Keep the master
-    // playlist (which references both tracks) instead of emitting such children.
-    const externalAudioGroups = new Set();
-    for (const line of lines) {
-      if (!/^#EXT-X-MEDIA:/i.test(line) || !/TYPE=AUDIO/i.test(line)) continue;
-      const gid = /GROUP-ID="([^"]+)"/i.exec(line);
-      const uri = /URI="([^"]+)"/i.exec(line);
-      if (gid && uri) externalAudioGroups.add(gid[1]);
-    }
-
     const byHeight = {};
-    let usesExternalAudio = false;
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       if (line.indexOf("#EXT-X-STREAM-INF") !== 0) continue;
-      const audio = /(?:^|,)\s*AUDIO="([^"]+)"/i.exec(line);
-      if (audio && externalAudioGroups.has(audio[1])) usesExternalAudio = true;
       let next = "";
       for (let k = i + 1; k < lines.length; k++) {
         const t = lines[k].trim();
@@ -258,11 +243,7 @@ async function expandHls(masterUrl, hdrs) {
     if (hs.length) {
       out[0].quality = "Auto (up to " + qualityLabel(hs[0]) + ")";
       out[0].height = hs[0];
-      if (usesExternalAudio) {
-        DIAG.push("hls:external-audio-master-only");
-      } else {
-        hs.forEach((h) => out.push({ url: byHeight[h].url, quality: qualityLabel(h), height: h }));
-      }
+      hs.forEach((h) => out.push({ url: byHeight[h].url, quality: qualityLabel(h), height: h }));
     }
   } catch (e) {}
   return out;
@@ -352,7 +333,7 @@ async function resolveDailymotion(url, pageUrl) {
       }
     } catch (e) {}
   }
-  best.forEach((o) => { o.info = bestName; o.hdrs = H; });
+  best.forEach((o) => { o.info = bestName; o.hdrs = UA; });
   return best;
 }
 
