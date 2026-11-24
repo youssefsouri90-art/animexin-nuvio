@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
-  "version": "2.4.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, ani.pm, anime3rb.com, animewitcher.com), Netflix streams (net52.cc), and movies & TV (cinema.army, mapple, redflix)",
+  "version": "2.5.0",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, ani.pm, anime3rb.com, animewitcher.com), Netflix streams (net52.cc), and movies & TV (cinema.army, mapple, redflix); plus Eclipsia ports (AnimeWorld, ToonWorld4All, AniZone, Toonix, Anv, Re:ANIME, VidNest, VidBolt, WcoFlix, AnimeCube, AniChan, AniKage, Anikoto)",
   "scrapers": [
     {
       "id": "animexin",
@@ -9,10 +9,16 @@
       "description": "Donghua and anime (EN/ID hardsub) from animexin.dev, with WeTV subtitles",
       "version": "1.2.0",
       "author": "you",
-      "supportedTypes": ["movie", "tv"],
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
       "filename": "providers/animexin.js",
       "enabled": true,
-      "formats": ["hls", "mp4"]
+      "formats": [
+        "hls",
+        "mp4"
+      ]
     },
     {
       "id": "donghuaworld",
@@ -20,10 +26,16 @@
       "description": "Donghua with quality options up to 4K from donghuaworld.com, with WeTV subtitles",
       "version": "1.2.0",
       "author": "you",
-      "supportedTypes": ["movie", "tv"],
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
       "filename": "providers/donghuaworld.js",
       "enabled": true,
-      "formats": ["hls", "mp4"]
+      "formats": [
+        "hls",
+        "mp4"
+      ]
     },
     {
       "id": "anichi",
@@ -31,10 +43,16 @@
       "description": "Anime streams from anichi.cz with subtitle tracks and quality options up to 1080p",
       "version": "1.0.0",
       "author": "you",
-      "supportedTypes": ["movie", "tv"],
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
       "filename": "providers/anichi.js",
       "enabled": true,
-      "formats": ["hls", "mp4"]
+      "formats": [
+        "hls",
+        "mp4"
+      ]
     },
     {
       "id": "anipm",
@@ -42,11 +60,19 @@
       "description": "Anime from ani.pm: Sub/Dub/HardSub 1080p with multi-language subtitles, plus Multi-Dub HLS",
       "version": "1.1.0",
       "author": "you",
-      "supportedTypes": ["movie", "tv"],
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
       "filename": "providers/anipm.js",
       "enabled": true,
-      "formats": ["hls"],
-      "contentLanguage": ["en", "ja"]
+      "formats": [
+        "hls"
+      ],
+      "contentLanguage": [
+        "en",
+        "ja"
+      ]
     },
     {
       "id": "cinemaarmy",
@@ -54,10 +80,15 @@
       "description": "Movie and TV streams from cinema.army with HLS quality options up to 1080p",
       "version": "1.0.0",
       "author": "you",
-      "supportedTypes": ["movie", "tv"],
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
       "filename": "providers/cinemaarmy.js",
       "enabled": true,
-      "formats": ["hls"]
+      "formats": [
+        "hls"
+      ]
     },
     {
       "id": "mapple",
@@ -65,10 +96,16 @@
       "description": "Movie and TV streams from Mapple",
       "version": "1.0.0",
       "author": "you",
-      "supportedTypes": ["movie", "tv"],
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
       "filename": "providers/mapple.js",
       "enabled": true,
-      "formats": ["hls", "mp4"]
+      "formats": [
+        "hls",
+        "mp4"
+      ]
     },
     {
       "id": "redflix",
@@ -76,10 +113,15 @@
       "description": "Movies and TV with quality options up to 1080p and multi-language audio/subtitles (redflix.ac)",
       "version": "1.0.0",
       "author": "you",
-      "supportedTypes": ["movie", "tv"],
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
       "filename": "providers/redflix.js",
       "enabled": true,
-      "formats": ["hls"]
+      "formats": [
+        "hls"
+      ]
     },
     {
       "id": "anime3rb",
@@ -87,10 +129,15 @@
       "description": "Anime MP4 streams from anime3rb.com (vid3rb) via local Termux Node.js server",
       "version": "1.0.0",
       "author": "you",
-      "supportedTypes": ["movie", "tv"],
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
       "filename": "providers/anime3rb.js",
       "enabled": true,
-      "formats": ["mp4"]
+      "formats": [
+        "mp4"
+      ]
     },
     {
       "id": "animewitchr",
@@ -98,10 +145,15 @@
       "description": "Arabic anime MP4 streams from animewitcher.com (Algolia + Firestore + Pixeldrain)",
       "version": "1.0.0",
       "author": "you",
-      "supportedTypes": ["movie", "tv"],
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
       "filename": "providers/animewitchr.js",
       "enabled": true,
-      "formats": ["mp4"]
+      "formats": [
+        "mp4"
+      ]
     },
     {
       "id": "netflix",
@@ -109,10 +161,299 @@
       "description": "Netflix movies and TV streams via NetMirror (net52.cc) with subtitle tracks",
       "version": "1.0.0",
       "author": "you",
-      "supportedTypes": ["movie", "tv"],
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
       "filename": "providers/netflix.js",
       "enabled": true,
-      "formats": ["hls", "mp4"]
+      "formats": [
+        "hls",
+        "mp4"
+      ]
+    },
+    {
+      "id": "esvyl",
+      "name": "Esvyl (VidBolt)",
+      "description": "VidBolt — 1080p • Mainstream • Anime (from Eclipsia)",
+      "version": "1.1.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/esvyl.js",
+      "enabled": true,
+      "formats": [
+        "mp4",
+        "hls"
+      ],
+      "contentLanguage": [
+        "en"
+      ]
+    },
+    {
+      "id": "gravix",
+      "name": "Gravix (AnimeWorld)",
+      "description": "AnimeWorld — Multi Dub • Anime (from Eclipsia)",
+      "version": "1.1.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/gravix.js",
+      "enabled": true,
+      "formats": [
+        "hls",
+        "mp4"
+      ],
+      "contentLanguage": [
+        "en",
+        "ja",
+        "hi",
+        "te",
+        "ta"
+      ]
+    },
+    {
+      "id": "ilvyrel",
+      "name": "Ilvyrel (ToonWorld4All)",
+      "description": "ToonWorld4All — Multi Dub • Anime (from Eclipsia)",
+      "version": "1.1.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/ilvyrel.js",
+      "enabled": true,
+      "formats": [
+        "mkv",
+        "hls",
+        "mp4"
+      ],
+      "contentLanguage": [
+        "en",
+        "ja",
+        "hi",
+        "te",
+        "ta"
+      ]
+    },
+    {
+      "id": "lenyr",
+      "name": "Lenyr (AniZone)",
+      "description": "AniZone — Multi Dub • Anime (from Eclipsia)",
+      "version": "2.1.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/lenyr.js",
+      "enabled": true,
+      "formats": [
+        "mp4",
+        "hls"
+      ],
+      "contentLanguage": [
+        "en",
+        "ja"
+      ]
+    },
+    {
+      "id": "noctyx",
+      "name": "Noctyx (Toonix)",
+      "description": "Toonix — Anime • Hindi (from Eclipsia)",
+      "version": "1.1.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/noctyx.js",
+      "enabled": true,
+      "formats": [
+        "mp4",
+        "hls",
+        "mkv"
+      ],
+      "contentLanguage": [
+        "en",
+        "hi"
+      ]
+    },
+    {
+      "id": "ozeris",
+      "name": "Ozeris (Anv)",
+      "description": "Anv — Sub/Dub • Anime (from Eclipsia)",
+      "version": "1.1.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/ozeris.js",
+      "enabled": true,
+      "formats": [
+        "hls"
+      ],
+      "contentLanguage": [
+        "en",
+        "ja"
+      ]
+    },
+    {
+      "id": "praxiel",
+      "name": "Praxiel (Re:ANIME)",
+      "description": "Re:ANIME — Sub/Dub • Anime (from Eclipsia)",
+      "version": "1.2.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/praxiel.js",
+      "enabled": true,
+      "formats": [
+        "mkv"
+      ],
+      "contentLanguage": [
+        "en",
+        "ja"
+      ]
+    },
+    {
+      "id": "quinox",
+      "name": "Quinox (VidNest)",
+      "description": "VidNest — 1080p • Mainstream • Anime (from Eclipsia)",
+      "version": "1.1.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/quinox.js",
+      "enabled": true,
+      "formats": [
+        "mp4",
+        "hls"
+      ],
+      "contentLanguage": [
+        "en",
+        "hi",
+        "es",
+        "ja",
+        "ta",
+        "te"
+      ]
+    },
+    {
+      "id": "rylvane",
+      "name": "Rylvane (WcoFlix)",
+      "description": "WcoFlix — HardSub/Dub • Anime (from Eclipsia)",
+      "version": "1.1.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/rylvane.js",
+      "enabled": true,
+      "formats": [
+        "hls"
+      ],
+      "contentLanguage": [
+        "en",
+        "ja"
+      ]
+    },
+    {
+      "id": "vyranel",
+      "name": "Vyranel (AnimeCube)",
+      "description": "AnimeCube — Donghua (from Eclipsia)",
+      "version": "1.1.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/vyranel.js",
+      "enabled": true,
+      "formats": [
+        "mp4",
+        "mkv",
+        "hls"
+      ],
+      "contentLanguage": [
+        "en"
+      ]
+    },
+    {
+      "id": "xandril",
+      "name": "Xandril (AniChan)",
+      "description": "AniChan — Sub/Dub/HardSub • Anime (from Eclipsia)",
+      "version": "1.5.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/xandril.js",
+      "enabled": true,
+      "formats": [
+        "mp4",
+        "hls",
+        "mkv"
+      ],
+      "contentLanguage": [
+        "en",
+        "ja"
+      ]
+    },
+    {
+      "id": "xylos",
+      "name": "Xylos (AniKage)",
+      "description": "AniKage — Sub/Dub • Anime (from Eclipsia)",
+      "version": "1.1.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/xylos.js",
+      "enabled": true,
+      "formats": [
+        "mp4",
+        "mkv",
+        "hls"
+      ],
+      "contentLanguage": [
+        "en",
+        "ja"
+      ]
+    },
+    {
+      "id": "zyrvael",
+      "name": "Zyrvael (Anikoto)",
+      "description": "Anikoto — Sub/Dub • Anime (from Eclipsia)",
+      "version": "1.3.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/zyrvael.js",
+      "enabled": true,
+      "formats": [
+        "hls",
+        "mp4"
+      ],
+      "contentLanguage": [
+        "en",
+        "ja"
+      ]
     }
   ]
 }
