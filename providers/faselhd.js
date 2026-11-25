@@ -79,6 +79,24 @@ function seasonNumber(text, idx) {
 
 function json(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }
 
+// Accepts 1429, "1429", "tmdb:1429", "tt0944947" (IMDb), "tt0944947:1:2" (Stremio style).
+function resolveTmdbId(raw, type) {
+  var s = String(raw == null ? '' : raw).trim();
+  var imdb = /tt\d{5,}/.exec(s);
+  if (imdb) {
+    var url = 'https://api.themoviedb.org/3/find/' + imdb[0] + '?api_key=' + TMDB_KEY + '&external_source=imdb_id';
+    return fetch(url).then(json).then(function (r) {
+      var list = type === 'movie' ? r.movie_results : r.tv_results;
+      if (!list || !list.length) list = (r.movie_results || []).concat(r.tv_results || []);
+      if (!list.length) throw new Error('imdb id not found on TMDB: ' + imdb[0]);
+      return String(list[0].id);
+    });
+  }
+  var num = /(\d+)\s*$/.exec(s.replace(/^tmdb[:\-]?/i, '')) || /(\d+)/.exec(s);
+  if (!num) return Promise.reject(new Error('unrecognised id: ' + s));
+  return Promise.resolve(num[1]);
+}
+
 function tmdbTitles(id, type) {
   var kind = type === 'movie' ? 'movie' : 'tv';
   var base = 'https://api.themoviedb.org/3/' + kind + '/' + id + '?api_key=' + TMDB_KEY;
@@ -240,7 +258,8 @@ function findTargetPage(info, type, season, episode) {
 function getStreams(tmdbId, mediaType, season, episode) {
   var type = mediaType === 'movie' ? 'movie' : 'tv';
   LAST_ERR = '';
-  return tmdbTitles(tmdbId, type).then(function (info) {
+  var RECV = type + ' ' + String(tmdbId).slice(0, 14) + (type === 'tv' ? ' S' + season + 'E' + episode : '');
+  return resolveTmdbId(tmdbId, type).then(function (id) { return tmdbTitles(id, type); }).then(function (info) {
     return findTargetPage(info, type, parseInt(season, 10) || 1, parseInt(episode, 10) || 1);
   }).then(function (page) {
     if (!page) return [];
@@ -267,7 +286,13 @@ function getStreams(tmdbId, mediaType, season, episode) {
   }).catch(function (e) { log('error', e.message); return []; }).then(function (out) {
     if (!out.length && DIAG) {
       var why = LAST_ERR || 'no match / no players found';
-      return [{ name: 'FaselHD • DIAG', title: 'DIAG: ' + why, url: 'https://diag.invalid/none.m3u8', type: 'hls', quality: 'N/A', headers: {}, subtitles: [] }];
+      var step = (/(search|player) failed/.exec(why) || [])[1] || '';
+      var code = /HTTP (\d+)/.exec(why);
+      var brief = code ? (step ? step + ' ' : '') + 'HTTP ' + code[1]
+        : /Cloudflare challenge/.test(why) ? (step ? step + ' ' : '') + 'CF challenge'
+        : /fetch|network|TypeError/i.test(why) ? 'network error'
+        : why.slice(0, 40);
+      return [{ name: 'FaselHD • DIAG • ' + RECV + ' • ' + brief, title: 'DIAG: ' + RECV + ' | ' + why, url: 'https://diag.invalid/none.m3u8', type: 'hls', quality: brief.slice(0, 20), headers: {}, subtitles: [] }];
     }
     return out;
   });
