@@ -8,6 +8,7 @@ var TMDB_KEY = (typeof TMDB_API_KEY !== 'undefined' && TMDB_API_KEY) || '439c478
 var DEFAULT_BASE = 'https://www.faselhd.cc';
 var BASE = DEFAULT_BASE;
 // DIAG = true: when nothing is found, return one fake entry whose title shows the reason (visible inside Nuvio). Set false when done testing.
+var VER = '0.1.2';
 var DIAG = true;
 var LAST_ERR = '';
 var DEBUG = (typeof process !== 'undefined' && process.env && !!process.env.FASEL_DEBUG);
@@ -292,7 +293,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
         : /Cloudflare challenge/.test(why) ? (step ? step + ' ' : '') + 'CF challenge'
         : /fetch|network|TypeError/i.test(why) ? 'network error'
         : why.slice(0, 40);
-      return [{ name: 'FaselHD • DIAG • ' + RECV + ' • ' + brief, title: 'DIAG: ' + RECV + ' | ' + why, url: 'https://diag.invalid/none.m3u8', type: 'hls', quality: brief.slice(0, 20), headers: {}, subtitles: [] }];
+      return [{ name: 'FaselHD v' + VER + ' • ' + RECV + ' • ' + brief, title: 'DIAG: ' + RECV + ' | ' + why, url: 'https://diag.invalid/none.m3u8', type: 'hls', quality: brief.slice(0, 20), headers: {}, subtitles: [] }];
     }
     return out;
   });
