@@ -10,7 +10,7 @@ var TMDB_KEY = MY_TMDB_KEY || (typeof TMDB_API_KEY !== 'undefined' && TMDB_API_K
 var DEFAULT_BASE = 'https://www.faselhd.cc';
 var BASE = DEFAULT_BASE;
 // DIAG = true: when nothing is found, return one fake entry whose title shows the reason (visible inside Nuvio). Set false when done testing.
-var VER = '0.1.3';
+var VER = '0.1.5';
 var DIAG = true;
 var LAST_ERR = '';
 var DEBUG = (typeof process !== 'undefined' && process.env && !!process.env.FASEL_DEBUG);
@@ -18,20 +18,32 @@ var ENV = (typeof process !== 'undefined' && process.env) ? process.env : {};
 var SET = (typeof SCRAPER_SETTINGS !== 'undefined' && SCRAPER_SETTINGS) ? SCRAPER_SETTINGS : {};
 // Cloudflare bypass: paste a cf_clearance cookie (and the SAME User-Agent) from a browser that opened the site.
 // Termux: FASEL_COOKIE="cf_clearance=..." FASEL_UA="..." node ...   |  Nuvio: edit the two constants below.
-var CF_COOKIE = ENV.FASEL_COOKIE || SET.cookie || '';
+// Optional manual Cloudflare bypass for testing: paste cf_clearance (and the SAME browser User-Agent) here. Expires, IP-bound.
+var MY_CF_COOKIE = '';   // e.g. 'cf_clearance=xxxxx'
+var MY_CF_UA = '';       // e.g. navigator.userAgent of the browser that got the cookie
+var CF_COOKIE = ENV.FASEL_COOKIE || SET.cookie || MY_CF_COOKIE || '';
 if (/[^\x20-\x7e]/.test(CF_COOKIE)) { CF_COOKIE = ''; if (ENV.FASEL_DEBUG) console.log('[FaselHD] cookie ignored: contains non-ASCII characters'); }
-var UA = ENV.FASEL_UA || SET.userAgent || 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
+var UA = ENV.FASEL_UA || SET.userAgent || MY_CF_UA || 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 if (/[^\x20-\x7e]/.test(UA)) UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 function log() {
   var first = String(arguments[0] || '');
   if (/failed|error|Cloudflare/i.test(first + ' ' + String(arguments[1] || ''))) LAST_ERR = [].slice.call(arguments).join(' ').slice(0, 140); if (DEBUG && typeof console !== 'undefined') console.log.apply(console, ['[FaselHD]'].concat([].slice.call(arguments))); }
 
+// Same header set as the original plugin's getModernHeaders().
 function headers(ref) {
   return {
     'User-Agent': UA,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7',
+    'sec-ch-ua': '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
+    'sec-ch-ua-mobile': '?1',
+    'sec-ch-ua-platform': '"Android"',
+    'upgrade-insecure-requests': '1',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'sec-fetch-site': 'none',
+    'sec-fetch-mode': 'navigate',
+    'sec-fetch-dest': 'document',
+    'Accept-Language': 'ar-EG,ar;q=0.9',
+    'priority': 'u=0, i',
     'Referer': ref || (BASE + '/')
   };
 }
@@ -118,7 +130,7 @@ function tmdbTitles(id, type) {
 
 function parseCards(html) {
   var out = [], seen = {};
-  var parts = html.split(/class="[^"]*\b(?:postDiv|blockMovie)\b[^"]*"/);
+  var parts = html.split(/class="[^"]*\b(?:postDiv|blockMovie|search-item)\b[^"]*"/);
   parts.shift();
   parts.forEach(function (p) {
     p = p.slice(0, 1800);
@@ -130,8 +142,26 @@ function parseCards(html) {
   return out;
 }
 
+function searchAjax(q) {
+  var h = headers(BASE + '/');
+  h['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
+  h['X-Requested-With'] = 'XMLHttpRequest';
+  h['Accept'] = '*/*';
+  if (CF_COOKIE) h['Cookie'] = CF_COOKIE;
+  return fetch(BASE + '/wp-admin/admin-ajax.php', {
+    method: 'POST', headers: h,
+    body: 'action=dtc_live&trsearch=' + encodeURIComponent(q)
+  }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' ajax search');
+    return r.text();
+  }).then(parseCards);
+}
+
 function search(q) {
-  return get(BASE + '/?s=' + encodeURIComponent(q)).then(parseCards);
+  return get(BASE + '/?s=' + encodeURIComponent(q)).then(parseCards).then(function (cards) {
+    if (cards.length) return cards;
+    return searchAjax(q);
+  });
 }
 
 function pickCard(cards, names, year, isTv) {
