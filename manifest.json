@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
   "version": "2.7.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, ani.pm, anime3rb.com, animewitcher.com, faselhd, koianime.lol), Netflix streams (net52.cc), and movies & TV (cinema.army, mapple, redflix); plus Eclipsia ports (AnimeWorld, ToonWorld4All, AniZone, Toonix, Anv, Re:ANIME, VidNest, VidBolt, WcoFlix, AnimeCube, AniChan, AniKage, Anikoto)",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, ani.pm, anime3rb.com, animewitcher.com, faselhd, koianime.lol), Netflix streams (net52.cc), and movies & TV (cinema.army, mapple, redflix, atlantic.bz); plus Eclipsia ports (AnimeWorld, ToonWorld4All, AniZone, Toonix, Anv, Re:ANIME, VidNest, VidBolt, WcoFlix, AnimeCube, AniChan, AniKage, Anikoto)",
   "scrapers": [
     {
       "id": "animexin",
@@ -139,6 +139,22 @@
         "tv"
       ],
       "filename": "providers/redflix.js",
+      "enabled": true,
+      "formats": [
+        "hls"
+      ]
+    },
+    {
+      "id": "atlantic",
+      "name": "Atlantic",
+      "description": "Movies and TV streams from atlantic.bz embeds with Arabic subtitles",
+      "version": "1.0.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/atlantic.js",
       "enabled": true,
       "formats": [
         "hls"
