@@ -1,7 +1,7 @@
 // Mapple (mapple.fun) provider for Nuvio (QuickJS: no DOM, no Node APIs).
 // Flow: cookie -> POST /api/ui/session -> POST /api/media-session (proof of work)
 //       -> POST /api/encrypt -> GET /api/stream-encrypted -> m3u8
-// The media token lives ~120 s, so everything runs in one getStreams() call.
+//       -> POST Next-Action (fetchSubtitlesAction) -> Arabic subtitles
 // ---------- proof of work (SHA-256 hashcash, optimized for QuickJS) ----------
 var SHA_K = [1116352408, 1899447441, -1245643825, -373957723, 961987163, 1508970993, -1841331548, -1424204075, -670586216, 310598401, 607225278, 1426881987, 1925078388, -2132889090, -1680079193, -1046744716, -459576895, -272742522, 264347078, 604807628, 770255983, 1249150122, 1555081692, 1996064986, -1740746414, -1473132947, -1341970488, -1084653625, -958395405, -710438585, 113926993, 338241895, 666307205, 773529912, 1294757372, 1396182291, 1695183700, 1986661051, -2117940946, -1838011259, -1564481375, -1474664885, -1035236496, -949202525, -778901479, -694614492, -200395387, 275423344, 430227734, 506948616, 659060556, 883997877, 958139571, 1322822218, 1537002063, 1747873779, 1955562222, 2024104815, -2067236844, -1933114872, -1866530822, -1538233109, -1090935817, -965641998];
 var SHA_IV = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
@@ -194,9 +194,11 @@ function solvePow(challenge, difficulty, maxIter) {
   return -1;
 }
 
-// ================= Mapple provider (streams only) =================
+// ================= Mapple provider (streams + Arabic subtitles) =================
 const BASE = "https://mapple.fun";
 const TMDB_API_KEY = "4d15cca3b68f75e9a08080dbe6a0568b";
+const SUBTITLE_ACTION_ID = "40fb35cecac742a121a2ee3c2bb9f6ea6b483b7e86";
+
 const UA = {
   "User-Agent":
     "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36",
@@ -246,6 +248,85 @@ function withTimeout(promise, ms) {
     promise,
     new Promise((resolve) => setTimeout(() => resolve({ fail: "TIMEOUT" }), ms)),
   ]);
+}
+
+// ---------- Arabic subtitles (Next.js Server Action) ----------
+function isArabicSub(item) {
+  if (!item) return false;
+  var lang = String(item.lang || "").toLowerCase().trim();
+  var label = String(item.label || "").toLowerCase();
+  return (
+    lang === "ar" ||
+    lang === "ara" ||
+    lang.indexOf("ar-") === 0 ||
+    label.indexOf("arabic") >= 0 ||
+    label.indexOf("عرب") >= 0
+  );
+}
+
+function parseFlightSubtitles(rawText) {
+  if (!rawText) return [];
+  var lines = String(rawText).split(/\r?\n/);
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    if (line.indexOf("1:") === 0) {
+      var jsonPart = line.slice(2).trim();
+      try {
+        var parsed = JSON.parse(jsonPart);
+        if (Array.isArray(parsed)) {
+          return parsed
+            .filter(function (x) {
+              return x && x.url && isArabicSub(x);
+            })
+            .map(function (x, idx) {
+              return {
+                url: x.url,
+                lang: "ar",
+                label: x.label || "Arabic" + (idx > 0 ? " (" + (idx + 1) + ")" : ""),
+                source: x.source || "",
+              };
+            });
+        }
+      } catch (e) {}
+    }
+  }
+  return [];
+}
+
+async function fetchSubtitles(sess, pagePath, id, type, scope, mtoken) {
+  if (!sess) return [];
+  try {
+    var headers = Object.assign({}, BROWSER, {
+      Accept: "text/x-component",
+      "Content-Type": "text/plain;charset=UTF-8",
+      "Next-Action": SUBTITLE_ACTION_ID,
+      Referer: BASE + pagePath,
+    });
+    if (sess.cookie) headers.Cookie = sess.cookie;
+
+    var payload = [
+      {
+        mediaId: id,
+        mediaType: type,
+        tv_slug: scope || "",
+        requestToken: sess.requestToken,
+        token: mtoken || "",
+      },
+    ];
+
+    var r = await fetch(BASE + pagePath, {
+      method: "POST",
+      headers: headers,
+      body: JSON.stringify(payload),
+    });
+    var txt = await r.text();
+    var subs = parseFlightSubtitles(txt);
+    DIAG.push("subs_ar:" + subs.length);
+    return subs;
+  } catch (e) {
+    DIAG.push("subs_ar:err");
+    return [];
+  }
 }
 
 // ---------- Kitsu / IMDb -> TMDB mapping ----------
@@ -524,6 +605,9 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     let mtoken = await getMediaToken(sess, id, type, scope);
     if (!mtoken) return fail("no media token");
 
+    // جلب الترجمة العربية بالتوازي مع بدء فحص السيرفرات
+    const subsPromise = withTimeout(fetchSubtitles(sess, pagePath, id, type, scope, mtoken), 6000);
+
     const found = [];
     for (let i = 0; i < SOURCES.length && found.length < MAX_OK; i += 8) {
       const batch = SOURCES.slice(i, i + 8);
@@ -542,6 +626,9 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     }
     if (!found.length) return fail("no source worked");
 
+    const subsRes = await subsPromise;
+    const arabicSubs = Array.isArray(subsRes) ? subsRes : [];
+
     const streams = [], seen = {};
     for (const f of found) {
       const su = f.data.stream_url;
@@ -554,7 +641,15 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         seen[l.url] = 1;
         const sourceQuality = f.data.quality || f.data.resolution || f.data.height;
         const q = l.quality === "Direct" && sourceQuality ? String(sourceQuality).match(/^\d+$/) ? qualityLabel(Number(sourceQuality)) : String(sourceQuality) : l.quality;
-        streams.push({ name: "Mapple " + f.src, title: "Mapple " + f.src, url: l.url, quality: q, headers: PH, provider: "mapple" });
+        streams.push({
+          name: "Mapple " + f.src,
+          title: "Mapple " + f.src,
+          url: l.url,
+          quality: q,
+          headers: PH,
+          subtitles: arabicSubs,
+          provider: "mapple",
+        });
       });
     }
     if (PROBE) {
