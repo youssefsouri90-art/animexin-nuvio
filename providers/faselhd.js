@@ -4,11 +4,13 @@
  * NOTE: the original uses a WebView to pass Cloudflare and to sniff the m3u8. This port does it with plain
  * HTTP requests, so it works only while the site/player is reachable without a Cloudflare challenge.
  */
-var TMDB_KEY = (typeof TMDB_API_KEY !== 'undefined' && TMDB_API_KEY) || '439c478a771f35c05022f9feabcca01c';
+// Your own TMDB v3 API key (themoviedb.org > Settings > API > "API Key").
+var MY_TMDB_KEY = '4d15cca3b68f75e9a08080dbe6a0568b';
+var TMDB_KEY = MY_TMDB_KEY || (typeof TMDB_API_KEY !== 'undefined' && TMDB_API_KEY) || '439c478a771f35c05022f9feabcca01c';
 var DEFAULT_BASE = 'https://www.faselhd.cc';
 var BASE = DEFAULT_BASE;
 // DIAG = true: when nothing is found, return one fake entry whose title shows the reason (visible inside Nuvio). Set false when done testing.
-var VER = '0.1.2';
+var VER = '0.1.3';
 var DIAG = true;
 var LAST_ERR = '';
 var DEBUG = (typeof process !== 'undefined' && process.env && !!process.env.FASEL_DEBUG);
