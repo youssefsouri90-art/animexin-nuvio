@@ -7,7 +7,7 @@
 const BASE = "https://koianime.lol";
 const TMDB_KEY = "4d15cca3b68f75e9a08080dbe6a0568b"; // TMDB v3 key
 
-const INCLUDE_DUB = true;       // also ask hd1 for the dub track
+// Subtitled (sub) tracks only: dub is never requested.
 const ADD_DIRECT_LINKS = true;  // besides the site's proxy URL, add the original host URL
 
 const UA_STR =
@@ -193,9 +193,9 @@ function normSubs(list) {
   const subs = (Array.isArray(list) ? list : []).filter((s) => s && s.url).map((s) => {
     const url = absUrl(BASE + "/", s.url);
     const label = s.lang || s.label || "Subtitles";
-    return { url, lang: label, language: label, label, name: label, _srt: /\.srt|format=srt|\.vtt/i.test(url) ? 0 : 1, _en: /english/i.test(label) ? 0 : 1 };
+    return { url, lang: label, language: label, label, name: label, _srt: /\.srt|format=srt|\.vtt/i.test(url) ? 0 : 1, _en: /english/i.test(label) ? 0 : 1, _full: /full/i.test(label) ? 0 : /dubtitle|signs/i.test(label) ? 2 : 1 };
   });
-  subs.sort((a, b) => a._en - b._en || a._srt - b._srt);
+  subs.sort((a, b) => a._en - b._en || a._full - b._full || a._srt - b._srt);
   return subs.slice(0, 8).map((s) => ({ url: s.url, lang: s.lang, language: s.language, label: s.label, name: s.name }));
 }
 
@@ -269,14 +269,19 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       if (ids.length) providers = ids;
     } catch (e) {}
 
-    const jobs = [];
-    providers.forEach((p) => {
-      jobs.push(fromProvider(p, alId, isMovie ? 1 : episode, "sub").catch((e) => { DIAG.push(p + " err " + (e && e.message)); return []; }));
-    });
-    if (INCLUDE_DUB && providers.indexOf("hd1") >= 0) {
-      jobs.push(fromProvider("hd1", alId, isMovie ? 1 : episode, "dub").catch(() => []));
-    }
-    const groups = await Promise.all(jobs);
+    // A provider sometimes answers empty or fails on the first try: retry once.
+    const ep = isMovie ? 1 : episode;
+    const subOnly = async (p) => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const r = await fromProvider(p, alId, ep, "sub");
+          if (r.length) return r;
+        } catch (e) { DIAG.push(p + " err " + (e && e.message)); }
+        if (attempt === 0) await sleep(1500);
+      }
+      return [];
+    };
+    const groups = await Promise.all(providers.map(subOnly));
 
     const streams = [];
     groups.forEach((g) => {
