@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
-  "version": "2.6.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, ani.pm, anime3rb.com, animewitcher.com, faselhd), Netflix streams (net52.cc), and movies & TV (cinema.army, mapple, redflix); plus Eclipsia ports (AnimeWorld, ToonWorld4All, AniZone, Toonix, Anv, Re:ANIME, VidNest, VidBolt, WcoFlix, AnimeCube, AniChan, AniKage, Anikoto)",
+  "version": "2.7.0",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, ani.pm, anime3rb.com, animewitcher.com, faselhd, koianime.lol), Netflix streams (net52.cc), and movies & TV (cinema.army, mapple, redflix); plus Eclipsia ports (AnimeWorld, ToonWorld4All, AniZone, Toonix, Anv, Re:ANIME, VidNest, VidBolt, WcoFlix, AnimeCube, AniChan, AniKage, Anikoto)",
   "scrapers": [
     {
       "id": "animexin",
@@ -68,6 +68,27 @@
       "enabled": true,
       "formats": [
         "hls"
+      ],
+      "contentLanguage": [
+        "en",
+        "ja"
+      ]
+    },
+    {
+      "id": "koianime",
+      "name": "KoiAnime",
+      "description": "Anime from koianime.lol (AniList ids): HLS qualities, Sub/Dub, English subtitles",
+      "version": "1.0.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/koianime.js",
+      "enabled": true,
+      "formats": [
+        "hls",
+        "mp4"
       ],
       "contentLanguage": [
         "en",
