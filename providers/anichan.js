@@ -15,6 +15,12 @@ const B_B64 = "/AeTklmXxlT/cn4bFeZeq62A4+iyNcyMhZyEqsV7boE=";
 let cachedSession = null;
 const idCache = new Map();
 
+function sleep(ms) {
+  return new Promise(function (resolve) {
+    setTimeout(resolve, ms);
+  });
+}
+
 function fetchWithTimeout(url, options = {}, timeoutMs = 4500) {
   if (typeof AbortController === "undefined") {
     return fetch(url, options);
@@ -484,20 +490,44 @@ function normalizeUrl(u) {
   return u.indexOf("/") === 0 ? BASE + u : u;
 }
 
-function normalizeLangCode(lang) {
-  const s = String(lang || "").toLowerCase();
-  if (s.indexOf("arab") !== -1) return "ar";
-  if (s.indexOf("engl") !== -1) return "en";
-  if (s.indexOf("chin") !== -1 || s.indexOf("zh") !== -1) return "zh";
-  if (s.indexOf("fren") !== -1 || s.indexOf("fr") !== -1) return "fr";
-  if (s.indexOf("germ") !== -1 || s.indexOf("de") !== -1) return "de";
-  if (s.indexOf("span") !== -1 || s.indexOf("es") !== -1) return "es";
-  if (s.indexOf("port") !== -1 || s.indexOf("pt") !== -1) return "pt";
-  if (s.indexOf("russ") !== -1 || s.indexOf("ru") !== -1) return "ru";
-  if (s.indexOf("ital") !== -1 || s.indexOf("it") !== -1) return "it";
-  if (s.indexOf("kore") !== -1 || s.indexOf("ko") !== -1) return "ko";
-  if (s.indexOf("japa") !== -1 || s.indexOf("ja") !== -1) return "ja";
-  return s.slice(0, 2) || "und";
+function normalizeLangInfo(lang) {
+  const raw = String(lang || "").trim();
+  const s = raw.toLowerCase();
+  if (s.indexOf("arab") !== -1 || s === "ar" || s === "ara") {
+    return { code: "ar", label: "Arabic" };
+  }
+  if (s.indexOf("engl") !== -1 || s === "en" || s === "eng") {
+    return { code: "en", label: "English" };
+  }
+  if (s.indexOf("chin") !== -1 || s.indexOf("zh") !== -1 || s === "chi") {
+    return { code: "zh", label: "Chinese" };
+  }
+  if (s.indexOf("fren") !== -1 || s.indexOf("fr") !== -1 || s === "fre") {
+    return { code: "fr", label: "French" };
+  }
+  if (s.indexOf("germ") !== -1 || s.indexOf("de") !== -1 || s === "ger") {
+    return { code: "de", label: "German" };
+  }
+  if (s.indexOf("span") !== -1 || s.indexOf("es") !== -1 || s === "spa") {
+    return { code: "es", label: "Spanish" };
+  }
+  if (s.indexOf("port") !== -1 || s.indexOf("pt") !== -1 || s === "por") {
+    return { code: "pt", label: "Portuguese" };
+  }
+  if (s.indexOf("russ") !== -1 || s.indexOf("ru") !== -1 || s === "rus") {
+    return { code: "ru", label: "Russian" };
+  }
+  if (s.indexOf("ital") !== -1 || s.indexOf("it") !== -1 || s === "ita") {
+    return { code: "it", label: "Italian" };
+  }
+  if (s.indexOf("kore") !== -1 || s.indexOf("ko") !== -1 || s === "kor") {
+    return { code: "ko", label: "Korean" };
+  }
+  if (s.indexOf("japa") !== -1 || s.indexOf("ja") !== -1 || s === "jpn") {
+    return { code: "ja", label: "Japanese" };
+  }
+  const cleanLabel = raw || "Subtitle";
+  return { code: s.slice(0, 2) || "und", label: cleanLabel };
 }
 
 function cleanTitle(raw) {
@@ -755,62 +785,64 @@ async function getStreams(id, mediaType, season, episode) {
     const anilistId = await resolveAnilistId(id, mediaType);
     if (!anilistId) return [];
 
-    const categories = ["sub", "dub"];
+    const category = "sub";
     const tiers = ["fast", "rest"];
     const streams = [];
     const seen = new Set();
 
-    for (let cIdx = 0; cIdx < categories.length; cIdx++) {
-      const category = categories[cIdx];
-      for (let tIdx = 0; tIdx < tiers.length; tIdx++) {
-        const tier = tiers[tIdx];
-        let servers = [];
-        try {
-          servers = await fetchServersFor(anilistId, epNum, category, tier);
-        } catch (_) {
-          servers = [];
-        }
-
-        if (!servers.length) continue;
-
-        for (let sIdx = 0; sIdx < servers.length; sIdx++) {
-          const srv = servers[sIdx];
-          const streamUrl = normalizeUrl(srv && srv.stream);
-          if (!streamUrl || seen.has(streamUrl)) continue;
-          seen.add(streamUrl);
-
-          const subtitles = Array.isArray(srv.subtitles)
-            ? srv.subtitles
-                .map(function (sub, idx) {
-                  const subUrl = normalizeUrl(sub && (sub.url || sub.ass));
-                  if (!subUrl) return null;
-                  return {
-                    id: "anichan-" + (srv.name || "srv") + "-" + category + "-" + idx,
-                    lang: normalizeLangCode(sub.lang),
-                    label: sub.lang || "Subtitle",
-                    url: subUrl,
-                  };
-                })
-                .filter(Boolean)
-            : [];
-
-          streams.push({
-            name: "AniChan (" + category.toUpperCase() + ")",
-            title:
-              (srv.label || srv.name || "HLS") +
-              " · " +
-              category.toUpperCase() +
-              " · " +
-              tier,
-            quality: srv.quality || "Auto",
-            url: streamUrl,
-            headers: HEADERS_BASE,
-            subtitles,
-          });
-        }
-
-        break;
+    for (let tIdx = 0; tIdx < tiers.length; tIdx++) {
+      const tier = tiers[tIdx];
+      if (tIdx > 0) {
+        await sleep(250);
       }
+
+      let servers = [];
+      try {
+        servers = await fetchServersFor(anilistId, epNum, category, tier);
+      } catch (_) {
+        servers = [];
+      }
+
+      if (!servers.length) continue;
+
+      for (let sIdx = 0; sIdx < servers.length; sIdx++) {
+        const srv = servers[sIdx];
+        const streamUrl = normalizeUrl(srv && srv.stream);
+        if (!streamUrl || seen.has(streamUrl)) continue;
+        seen.add(streamUrl);
+
+        const subtitles = Array.isArray(srv.subtitles)
+          ? srv.subtitles
+              .map(function (sub, idx) {
+                const subUrl = normalizeUrl(sub && (sub.url || sub.ass));
+                if (!subUrl) return null;
+                const info = normalizeLangInfo(sub.lang);
+                return {
+                  id: "anichan-" + (srv.name || "srv") + "-" + category + "-" + idx,
+                  name: info.label,
+                  lang: info.code,
+                  language: info.label,
+                  label: info.label,
+                  url: subUrl,
+                };
+              })
+              .filter(Boolean)
+          : [];
+
+        streams.push({
+          name: "AniChan (SUB)",
+          title:
+            (srv.label || srv.name || "HLS") +
+            " · SUB · " +
+            tier,
+          quality: srv.quality || "Auto",
+          url: streamUrl,
+          headers: HEADERS_BASE,
+          subtitles,
+        });
+      }
+
+      if (streams.length > 0) break;
     }
 
     return streams;
