@@ -374,15 +374,27 @@ async function fetchVidnestStream(anilistId, episodeNum, subOrDub = "sub") {
       const streamUrl = firstSrc?.file || firstSrc?.url;
       if (!streamUrl) continue;
 
-      const subtitles = (data?.tracks || data?.subtitles || [])
+      const rawTracks = data?.tracks || data?.subtitles || [];
+      const subtitles = rawTracks
+        .filter(t => t && t.kind !== "thumbnails")
         .map((t, idx) => {
-          const fileUrl = t?.file || t?.url;
-          if (!fileUrl) return null;
-          const label = t?.label || t?.lang || `Track ${idx + 1}`;
+          const fileUrl = String(t?.file || t?.url || "").trim();
+          if (!fileUrl || /thumbnails\.vtt/i.test(fileUrl)) return null;
+
+          const rawLabel = String(t?.label || t?.lang || t?.language || `Track ${idx + 1}`).trim();
+          const isArabic = /arabic|\bara\b|\bar\b/i.test(rawLabel) || /\/ara[-_]/i.test(fileUrl);
+          const langName = isArabic ? "Arabic" : rawLabel;
+
           return {
+            id: `sub-${idx + 1}`,
             url: fileUrl,
-            lang: label,
-            isArabic: /arabic|\bara\b/i.test(label)
+            file: fileUrl,
+            lang: langName,
+            language: langName,
+            label: langName,
+            format: /\.srt(\?|$)/i.test(fileUrl) ? "srt" : "vtt",
+            isArabic,
+            default: isArabic
           };
         })
         .filter(Boolean)
@@ -390,7 +402,9 @@ async function fetchVidnestStream(anilistId, episodeNum, subOrDub = "sub") {
 
       return {
         streamUrl,
-        headers: firstSrc?.referer ? { Referer: firstSrc.referer } : VIDNEST_HEADERS,
+        headers: firstSrc?.referer
+          ? { Referer: firstSrc.referer, "User-Agent": VIDNEST_HEADERS["User-Agent"] }
+          : VIDNEST_HEADERS,
         subtitles
       };
     } catch {}
@@ -443,6 +457,8 @@ export async function getStreams(episodeUrl, fallbackEpNum = 1) {
   if (!result || !result.streamUrl) return [];
 
   return [{
+    id: `animotvslash-${anilistId}-${episodeNum}-${subOrDub}`,
+    name: "AnimoTVSlash",
     title: `AnimoTVSlash (${subOrDub.toUpperCase()})`,
     url: result.streamUrl,
     headers: result.headers,
