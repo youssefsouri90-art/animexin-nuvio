@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
   "version": "2.7.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, ani.pm, anime3rb.com, animewitcher.com, faselhd, koianime.lol), Netflix streams (net52.cc), and movies & TV (cinema.army, mapple, redflix, atlantic.bz); plus Eclipsia ports (AnimeWorld, ToonWorld4All, AniZone, Toonix, Anv, Re:ANIME, VidNest, VidBolt, WcoFlix, AnimeCube, AniChan, AniKage, Anikoto)",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, ani.pm, anime3rb.com, animewitcher.com, faselhd, koianime.lol, animotvslash.org), Netflix streams (net52.cc), and movies & TV (cinema.army, mapple, redflix, atlantic.bz); plus Eclipsia ports (AnimeWorld, ToonWorld4All, AniZone, Toonix, Anv, Re:ANIME, VidNest, VidBolt, WcoFlix, AnimeCube, AniChan, AniKage, Anikoto)",
   "scrapers": [
     {
       "id": "animexin",
@@ -92,6 +92,25 @@
       ],
       "contentLanguage": [
         "en",
+        "ja"
+      ]
+    },
+    {
+      "id": "animotvslash",
+      "name": "AnimoTVSlash",
+      "description": "Anime SoftSub HLS streams from animotvslash.org with Arabic subtitles",
+      "version": "1.0.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/animotvslash.js",
+      "enabled": true,
+      "formats": [
+        "hls"
+      ],
+      "contentLanguage": [
         "ja"
       ]
     },
