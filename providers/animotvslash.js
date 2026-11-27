@@ -460,40 +460,86 @@ function normSlug(s) {
     .replace(/^-+|-+$/g, "");
 }
 
-async function findAnimePage(titles) {
+function scoreAnimeCandidate(url, text, titles, seasonNum) {
+  const u = String(url || "").toLowerCase();
+  const t = String(text || "").toLowerCase();
+  let score = 0;
+
+  if (/\btv\b/.test(t)) score += 25;
+  if (/\b(movie|ova|special|chronicle|recap|part-i|part-ii)\b/.test(u + " " + t)) score -= 25;
+
+  const sNum = Number(seasonNum) || 1;
+  const hasSeasonInUrl = /season[-_ ]?(\d+)/i.test(u);
+  const seasonMatch = /season[-_ ]?(\d+)/i.exec(u + " " + t);
+  const foundSeason = seasonMatch ? Number(seasonMatch[1]) : 1;
+
+  if (sNum > 1) {
+    if (foundSeason === sNum) score += 35;
+    else if (!hasSeasonInUrl) score -= 10;
+    else score -= 30;
+  } else {
+    if (!hasSeasonInUrl || foundSeason === 1) score += 20;
+    else score -= 20;
+  }
+
+  for (let i = 0; i < titles.length; i++) {
+    const sl = normSlug(titles[i]);
+    if (!sl) continue;
+    if (u.indexOf("/anime/" + sl + "/") !== -1) score += 40 - i * 3;
+    else if (u.indexOf(sl) !== -1) score += 15 - i * 2;
+  }
+
+  return score;
+}
+
+async function findAnimePage(titles, seasonNum) {
+  const sNum = Number(seasonNum) || 1;
+  const candidates = [];
+  const seen = {};
+
   for (let i = 0; i < titles.length; i++) {
     const q = titles[i];
     const slug = normSlug(q);
     if (slug) {
-      const candidates = [
+      const directList = [
+        sNum > 1 ? `${BASE_URL}/anime/${slug}-season-${sNum}/` : `${BASE_URL}/anime/${slug}/`,
         `${BASE_URL}/anime/${slug}/`,
-        `${BASE_URL}/series/${slug}/`,
       ];
-      for (let c = 0; c < candidates.length; c++) {
-        const html = await safeText(candidates[c], SITE_HEADERS);
-        if (html && /episode|watch|sub|dub|\/anime\/\d+/i.test(html)) {
-          return { url: candidates[c], html };
+      for (let d = 0; d < directList.length; d++) {
+        const du = directList[d];
+        if (!seen[du]) {
+          seen[du] = true;
+          candidates.push({ url: du, text: q, score: scoreAnimeCandidate(du, q, titles, sNum) + 10 });
         }
       }
     }
 
-    const searchUrls = [
-      `${BASE_URL}/?s=${encodeURIComponent(q)}`,
-      `${BASE_URL}/search?q=${encodeURIComponent(q)}`,
-    ];
-    for (let s = 0; s < searchUrls.length; s++) {
-      const sHtml = await safeText(searchUrls[s], SITE_HEADERS);
-      if (!sHtml) continue;
-      const linkRe = /href=["'](https?:\/\/animotvslash\.org\/(?:anime|series)\/[^"'?#]+\/?)["']/gi;
-      let m;
-      while ((m = linkRe.exec(sHtml)) !== null) {
-        const candidateUrl = m[1].endsWith("/") ? m[1] : m[1] + "/";
-        if (/\/episode-/i.test(candidateUrl)) continue;
-        const pageHtml = await safeText(candidateUrl, SITE_HEADERS);
-        if (pageHtml && /episode|sub|dub|\/anime\/\d+/i.test(pageHtml)) {
-          return { url: candidateUrl, html: pageHtml };
-        }
+    const sHtml = await safeText(`${BASE_URL}/?s=${encodeURIComponent(q)}`, SITE_HEADERS);
+    if (!sHtml) continue;
+    const linkRe =
+      /<a[^>]+href=["'](https?:\/\/animotvslash\.org\/anime\/[^"'?#]+\/?)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    let m;
+    while ((m = linkRe.exec(sHtml)) !== null) {
+      const cu = m[1].endsWith("/") ? m[1] : m[1] + "/";
+      if (/\/episode-/i.test(cu)) continue;
+      const cleanTxt = m[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      if (!seen[cu]) {
+        seen[cu] = true;
+        candidates.push({
+          url: cu,
+          text: cleanTxt,
+          score: scoreAnimeCandidate(cu, cleanTxt, titles, sNum),
+        });
       }
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+
+  for (let i = 0; i < Math.min(candidates.length, 6); i++) {
+    const pageHtml = await safeText(candidates[i].url, SITE_HEADERS);
+    if (pageHtml && /episode|sub|dub|\/anime\/\d+/i.test(pageHtml)) {
+      return { url: candidates[i].url, html: pageHtml };
     }
   }
   return null;
@@ -501,14 +547,14 @@ async function findAnimePage(titles) {
 
 function findEpisodeUrl(animeUrl, animeHtml, episodeNum) {
   const ep = Number(episodeNum) || 1;
-  const patterns = [
-    new RegExp(`href=["'](https?:\\/\\/animotvslash\\.org\\/[^"']*episode-${ep}(?:[^0-9][^"']*)?)["']`, "i"),
-    new RegExp(`href=["'](\\/[^"']*episode-${ep}(?:[^0-9][^"']*)?)["']`, "i"),
-  ];
-  for (let i = 0; i < patterns.length; i++) {
-    const m = patterns[i].exec(animeHtml);
-    if (m && m[1]) {
-      return m[1].startsWith("http") ? m[1] : `${BASE_URL}${m[1].startsWith("/") ? "" : "/"}${m[1]}`;
+  const linkRe = /href=["'](https?:\/\/animotvslash\.org\/[^"'?#]+episode[^"'?#]*)["']/gi;
+  let m;
+  while ((m = linkRe.exec(animeHtml)) !== null) {
+    const u = m[1];
+    if (/\.(css|js|png|jpg|jpeg|webp|svg|woff2?)(\?|$)/i.test(u)) continue;
+    const epMatch = /episode-(\d+(?:\.\d+)?)/i.exec(u);
+    if (epMatch && Number(epMatch[1]) === ep) {
+      return u.endsWith("/") ? u : u + "/";
     }
   }
   const baseNoSlash = animeUrl.replace(/\/+$/, "");
@@ -622,10 +668,11 @@ async function getStreams(tmdbId, mediaType, season, episode) {
   try {
     if (!tmdbId) return [];
     const epNum = Number(episode) || 1;
+    const seasonNum = Number(season) || 1;
     const titles = await getTmdbTitles(tmdbId, mediaType);
     if (!titles.length) return [];
 
-    const animePage = await findAnimePage(titles);
+    const animePage = await findAnimePage(titles, seasonNum);
     if (!animePage) return [];
 
     const epUrl = findEpisodeUrl(animePage.url, animePage.html, epNum);
