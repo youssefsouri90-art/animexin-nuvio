@@ -15,6 +15,20 @@ const B_B64 = "/AeTklmXxlT/cn4bFeZeq62A4+iyNcyMhZyEqsV7boE=";
 let cachedSession = null;
 const idCache = new Map();
 
+function fetchWithTimeout(url, options = {}, timeoutMs = 4500) {
+  if (typeof AbortController === "undefined") {
+    return fetch(url, options);
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(function () {
+    controller.abort();
+  }, timeoutMs);
+
+  return fetch(url, Object.assign({}, options, { signal: controller.signal })).finally(function () {
+    clearTimeout(timer);
+  });
+}
+
 function b64ToBytes(b64) {
   const clean = String(b64 || "").replace(/\s+/g, "");
   if (typeof atob === "function") {
@@ -428,12 +442,12 @@ async function getWatchSession(forceRefresh = false) {
   }
 
   try {
-    await fetch(BASE + "/site-config", {
+    await fetchWithTimeout(BASE + "/site-config", {
       headers: { "User-Agent": UA_STR, Referer: BASE + "/" },
-    });
+    }, 3500);
   } catch (_) {}
 
-  const res = await fetch(BASE + "/api/watch/session", {
+  const res = await fetchWithTimeout(BASE + "/api/watch/session", {
     method: "POST",
     headers: {
       "User-Agent": UA_STR,
@@ -442,7 +456,7 @@ async function getWatchSession(forceRefresh = false) {
       Origin: BASE,
     },
     body: JSON.stringify({ token: "" }),
-  });
+  }, 5000);
 
   if (!res.ok) {
     throw new Error("Session failed: " + res.status);
@@ -493,10 +507,15 @@ function cleanTitle(raw) {
     .trim();
 }
 
+function extractNumericId(raw) {
+  const s = String(raw || "").trim();
+  const m = s.match(/^(?:tmdb[:_-]?|anilist[:_-]?)?(\d{1,10})(?:[:_-]\d+)?$/i);
+  return m ? m[1] : null;
+}
+
 async function fetchTmdbMeta(id, mediaType) {
-  const raw = String(id || "").trim();
-  const cleanNum = raw.replace(/^(tmdb[:_-]?)/i, "").trim();
-  if (!/^\d+$/.test(cleanNum)) return null;
+  const cleanNum = extractNumericId(id);
+  if (!cleanNum) return null;
 
   const type = mediaType === "movie" ? "movie" : "tv";
   try {
@@ -508,9 +527,9 @@ async function fetchTmdbMeta(id, mediaType) {
       "?api_key=" +
       TMDB_API_KEY +
       "&append_to_response=alternative_titles";
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
       headers: { "User-Agent": UA_STR, Accept: "application/json" },
-    });
+    }, 4500);
     if (!res.ok) return null;
     const j = await res.json();
     const titles = [];
@@ -541,9 +560,9 @@ async function searchAnichanSuggest(title) {
   const qStr = cleanTitle(title) || String(title || "").trim();
   if (!qStr) return null;
   try {
-    const res = await fetch(BASE + "/api/suggest?q=" + encodeURIComponent(qStr), {
+    const res = await fetchWithTimeout(BASE + "/api/suggest?q=" + encodeURIComponent(qStr), {
       headers: { "User-Agent": UA_STR, Referer: BASE + "/" },
-    });
+    }, 4000);
     if (!res.ok) return null;
     const json = await res.json();
     const list = Array.isArray(json && json.results)
@@ -572,7 +591,7 @@ async function searchAniListId(title, year, mediaType) {
       "media(search: $search, type: $type, format: $format, seasonYear: $seasonYear) { " +
       "id title { romaji english native } } } }";
 
-    let res = await fetch(ANILIST_GQL, {
+    let res = await fetchWithTimeout(ANILIST_GQL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -588,13 +607,13 @@ async function searchAniListId(title, year, mediaType) {
           seasonYear: year ? Number(year) : undefined,
         },
       }),
-    });
+    }, 4500);
 
     let data = res.ok ? await res.json() : null;
     let list = data && data.data && data.data.Page && data.data.Page.media;
 
     if ((!Array.isArray(list) || !list.length) && year) {
-      res = await fetch(ANILIST_GQL, {
+      res = await fetchWithTimeout(ANILIST_GQL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -609,7 +628,7 @@ async function searchAniListId(title, year, mediaType) {
             format: formatFilter,
           },
         }),
-      });
+      }, 4500);
       data = res.ok ? await res.json() : null;
       list = data && data.data && data.data.Page && data.data.Page.media;
     }
@@ -642,23 +661,33 @@ async function resolveAnilistId(id, mediaType) {
 
   if (/^anilist[:_-](\d+)$/i.test(raw)) {
     resolved = raw.replace(/^anilist[:_-]/i, "");
-  } else if (/^(tmdb[:_-]?\d+|\d+)$/i.test(raw)) {
-    const tmdbInfo = await fetchTmdbMeta(raw, mediaType);
-    if (tmdbInfo && Array.isArray(tmdbInfo.titles)) {
-      for (let i = 0; i < tmdbInfo.titles.length; i++) {
-        resolved = await searchAnichanSuggest(tmdbInfo.titles[i]);
-        if (resolved) break;
+  } else {
+    const numId = extractNumericId(raw);
+    if (numId) {
+      const tmdbInfo = await fetchTmdbMeta(numId, mediaType);
+      if (tmdbInfo && Array.isArray(tmdbInfo.titles)) {
+        for (let i = 0; i < tmdbInfo.titles.length; i++) {
+          resolved = await searchAnichanSuggest(tmdbInfo.titles[i]);
+          if (resolved) break;
+        }
+        if (!resolved && tmdbInfo.titles.length) {
+          resolved = await searchAniListId(tmdbInfo.titles[0], tmdbInfo.year, mediaType);
+        }
       }
-      if (!resolved && tmdbInfo.titles.length) {
-        resolved = await searchAniListId(tmdbInfo.titles[0], tmdbInfo.year, mediaType);
+      if (!resolved && /^\d+$/.test(raw)) {
+        resolved = raw;
       }
     }
-    if (!resolved && /^\d+$/.test(raw)) {
-      resolved = raw;
+
+    if (!resolved && raw) {
+      const cleaned = raw
+        .replace(/^(anime|series|show|tt|kitsu|mal|tmdb)[:_-]/i, "")
+        .replace(/[-_:]+/g, " ")
+        .trim();
+      resolved =
+        (await searchAnichanSuggest(cleaned)) ||
+        (await searchAniListId(cleaned, null, mediaType));
     }
-  } else if (raw) {
-    const cleaned = raw.replace(/^(anime|series|show|tt|kitsu|mal)[:_-]/i, "").replace(/[-_]+/g, " ").trim();
-    resolved = (await searchAnichanSuggest(cleaned)) || (await searchAniListId(cleaned, null, mediaType));
   }
 
   if (resolved) idCache.set(cacheKey, resolved);
@@ -680,7 +709,7 @@ async function fetchServersFor(anilistId, ep, category, tier) {
       "&tier=" +
       encodeURIComponent(tier);
 
-    return fetch(url, {
+    return fetchWithTimeout(url, {
       headers: {
         "User-Agent": UA_STR,
         Referer: BASE + "/",
@@ -688,7 +717,7 @@ async function fetchServersFor(anilistId, ep, category, tier) {
         "X-Wk": WK,
         ...(sess.cookie ? { Cookie: sess.cookie } : {}),
       },
-    });
+    }, 5000);
   };
 
   let resp = await runRequest(session);
