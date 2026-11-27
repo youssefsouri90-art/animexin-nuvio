@@ -10,6 +10,9 @@ const TMDB_KEY =
 const UA_STR =
   "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36";
 
+const DESKTOP_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+
 const SITE_HEADERS = {
   "User-Agent": UA_STR,
   Referer: BASE_URL + "/",
@@ -24,7 +27,7 @@ const VIDNEST_HEADERS = {
 };
 
 const STREAM_HEADERS = {
-  "User-Agent": UA_STR,
+  "User-Agent": DESKTOP_UA,
   Referer: "https://megaplay.buzz/",
   Origin: "https://megaplay.buzz",
 };
@@ -673,6 +676,13 @@ async function fetchVidnestStream(anilistId, episodeNum, subOrDub, preferredKind
       const streamUrl = firstSrc && (firstSrc.file || firstSrc.url);
       if (!streamUrl) continue;
 
+      const headers = {
+        ...STREAM_HEADERS,
+      };
+      if (firstSrc && firstSrc.referer) {
+        headers.Referer = firstSrc.referer;
+      }
+
       const rawTracks = (data && (data.tracks || data.subtitles)) || [];
       const subtitles = rawTracks
         .filter((t) => t && t.kind !== "thumbnails")
@@ -695,19 +705,13 @@ async function fetchVidnestStream(anilistId, episodeNum, subOrDub, preferredKind
             language: langName,
             label: langName,
             format: /\.srt(\?|$)/i.test(fileUrl) ? "srt" : "vtt",
+            headers,
             isArabic,
             default: isArabic,
           };
         })
         .filter(Boolean)
         .sort((a, b) => (b.isArabic ? 1 : 0) - (a.isArabic ? 1 : 0));
-
-      const headers = {
-        ...STREAM_HEADERS,
-      };
-      if (firstSrc && firstSrc.referer) {
-        headers.Referer = firstSrc.referer;
-      }
 
       return {
         streamUrl,
