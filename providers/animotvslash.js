@@ -174,6 +174,24 @@ function b64UrlToBytes(str) {
   return out;
 }
 
+function absUrl(base, rel) {
+  if (!rel) return "";
+  if (/^https?:/i.test(rel)) return rel;
+  if (/^\/\//.test(rel)) return "https:" + rel;
+  if (rel[0] === "/") return base.replace(/^(https?:\/\/[^\/]+).*/, "$1") + rel;
+  return base.replace(/[^\/]*$/, "") + rel;
+}
+
+function qualityLabel(h) {
+  if (h >= 2000) return "2160p (4K)";
+  if (h >= 1400) return "1440p";
+  if (h >= 1000) return "1080p";
+  if (h >= 700) return "720p";
+  if (h >= 460) return "480p";
+  if (h >= 340) return "360p";
+  return h + "p";
+}
+
 // --- Pure JS SHA-256 ---
 function sha256Bytes(msgBytes) {
   const K = new Uint32Array([
@@ -646,6 +664,50 @@ function parseEpisodeEmbedMeta(epHtml, fallbackEpNum) {
   return { anilistId, episodeNum, subOrDub, sourceKind };
 }
 
+async function expandHlsVariants(masterUrl, hdrs) {
+  const out = [{ url: masterUrl, quality: "Auto", height: 0 }];
+  try {
+    const res = await fetch(masterUrl, { headers: hdrs });
+    if (!res || !res.ok) return out;
+    const txt = await res.text();
+    if (txt.indexOf("#EXTM3U") !== 0 || txt.indexOf("#EXT-X-STREAM-INF") < 0) {
+      return out;
+    }
+    const lines = txt.split(/\r?\n/);
+    const byHeight = {};
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.indexOf("#EXT-X-STREAM-INF") !== 0) continue;
+      let next = "";
+      for (let k = i + 1; k < lines.length; k++) {
+        const t = lines[k].trim();
+        if (t && t[0] !== "#") {
+          next = t;
+          break;
+        }
+      }
+      if (!next) continue;
+      const resMatch = /RESOLUTION=(\d+)x(\d+)/.exec(line);
+      if (!resMatch) continue;
+      const h = Math.max(
+        parseInt(resMatch[2], 10),
+        Math.round((parseInt(resMatch[1], 10) * 9) / 16)
+      );
+      const bw = parseInt((/(?:^|[,:])BANDWIDTH=(\d+)/.exec(line) || [0, 0])[1], 10);
+      if (!byHeight[h] || bw > byHeight[h].bw) {
+        byHeight[h] = { url: absUrl(masterUrl, next), bw };
+      }
+    }
+    const hs = Object.keys(byHeight).map(Number).sort((x, y) => y - x);
+    if (hs.length) {
+      out[0].quality = "Auto (up to " + qualityLabel(hs[0]) + ")";
+      out[0].height = hs[0];
+      hs.forEach((h) => out.push({ url: byHeight[h].url, quality: qualityLabel(h), height: h }));
+    }
+  } catch (_) {}
+  return out;
+}
+
 async function fetchVidnestStream(anilistId, episodeNum, subOrDub, preferredKind) {
   const mode = subOrDub === "dub" ? "dub" : "sub";
   const allEps = [
@@ -676,9 +738,7 @@ async function fetchVidnestStream(anilistId, episodeNum, subOrDub, preferredKind
       const streamUrl = firstSrc && (firstSrc.file || firstSrc.url);
       if (!streamUrl) continue;
 
-      const headers = {
-        ...STREAM_HEADERS,
-      };
+      const headers = { ...STREAM_HEADERS };
       if (firstSrc && firstSrc.referer) {
         headers.Referer = firstSrc.referer;
       }
@@ -701,7 +761,7 @@ async function fetchVidnestStream(anilistId, episodeNum, subOrDub, preferredKind
             id: `sub-${idx + 1}`,
             url: fileUrl,
             file: fileUrl,
-            lang: langName,
+            lang: isArabic ? "ar" : langName,
             language: langName,
             label: langName,
             format: /\.srt(\?|$)/i.test(fileUrl) ? "srt" : "vtt",
@@ -752,18 +812,28 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     );
     if (!result || !result.streamUrl) return [];
 
-    return [
-      {
-        id: `animotvslash-${meta.anilistId}-${meta.episodeNum}-${meta.subOrDub}`,
+    const variants = /m3u8|playlist/i.test(result.streamUrl)
+      ? await expandHlsVariants(result.streamUrl, result.headers)
+      : [{ url: result.streamUrl, quality: "auto", height: 0 }];
+
+    const seen = {};
+    const streams = [];
+    for (let i = 0; i < variants.length; i++) {
+      const v = variants[i];
+      if (!v || !v.url || seen[v.url]) continue;
+      seen[v.url] = true;
+      streams.push({
+        id: `animotvslash-${meta.anilistId}-${meta.episodeNum}-${meta.subOrDub}-${i}`,
         name: "AnimoTVSlash",
-        title: `AnimoTVSlash (${meta.subOrDub.toUpperCase()})`,
-        url: result.streamUrl,
-        quality: "auto",
+        title: `AnimoTVSlash (${meta.subOrDub.toUpperCase()}) - ${v.quality}`,
+        url: v.url,
+        quality: v.quality,
         headers: result.headers,
         provider: "animotvslash",
         subtitles: result.subtitles,
-      },
-    ];
+      });
+    }
+    return streams;
   } catch (_) {
     return [];
   }
