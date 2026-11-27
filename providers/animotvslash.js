@@ -23,6 +23,12 @@ const VIDNEST_HEADERS = {
   Accept: "application/json,text/plain,*/*",
 };
 
+const STREAM_HEADERS = {
+  "User-Agent": UA_STR,
+  Referer: "https://megaplay.buzz/",
+  Origin: "https://megaplay.buzz",
+};
+
 const B64_CHARS =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -696,12 +702,16 @@ async function fetchVidnestStream(anilistId, episodeNum, subOrDub, preferredKind
         .filter(Boolean)
         .sort((a, b) => (b.isArabic ? 1 : 0) - (a.isArabic ? 1 : 0));
 
+      const headers = {
+        ...STREAM_HEADERS,
+      };
+      if (firstSrc && firstSrc.referer) {
+        headers.Referer = firstSrc.referer;
+      }
+
       return {
         streamUrl,
-        headers:
-          firstSrc && firstSrc.referer
-            ? { Referer: firstSrc.referer, "User-Agent": UA_STR }
-            : VIDNEST_HEADERS,
+        headers,
         subtitles,
       };
     } catch (_) {}
