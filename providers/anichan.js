@@ -483,19 +483,46 @@ function normalizeLangCode(lang) {
   return s.slice(0, 2) || "und";
 }
 
+function extractTmdbId(raw, meta = {}) {
+  const candidates = [
+    raw?.tmdbId,
+    raw?.tmdb_id,
+    meta?.tmdbId,
+    meta?.tmdb_id,
+    typeof raw?.id === "string" && raw.id.startsWith("tmdb:") ? raw.id.replace(/^tmdb:/i, "") : null,
+  ];
+  for (const c of candidates) {
+    if (c != null && /^\d+$/.test(String(c).trim())) {
+      return String(c).trim();
+    }
+  }
+  return null;
+}
+
 function parseInvocationParams(arg1, arg2, arg3, arg4, arg5) {
   if (arg1 && typeof arg1 === "object" && !Array.isArray(arg1)) {
-    const meta = arg1.meta || arg1.metadata || arg1.userConfig || {};
+    const meta = arg1.meta || arg1.metadata || arg1.userConfig || arg1.context || {};
+    const tmdbId = extractTmdbId(arg1, meta);
+    const rawId = arg1.id != null ? String(arg1.id) : null;
+    const isImdb = rawId ? /^tt\d+/i.test(rawId) : false;
+
     return {
       anilistId: arg1.anilistId || arg1.anilist_id || meta.anilistId || null,
       malId: arg1.malId || arg1.idMal || meta.malId || meta.idMal || null,
-      tmdbId: arg1.tmdbId || arg1.tmdb_id || meta.tmdbId || null,
-      imdbId: arg1.imdbId || arg1.imdb_id || meta.imdbId || null,
-      id: arg1.id || null,
+      tmdbId,
+      imdbId: arg1.imdbId || arg1.imdb_id || meta.imdbId || (isImdb ? rawId : null),
+      id: rawId,
       mediaType: arg1.mediaType || arg1.type || meta.mediaType || null,
       season: Number(arg1.season ?? meta.season ?? 1) || 1,
       episode: Number(arg1.episode ?? arg1.ep ?? meta.episode ?? 1) || 1,
-      title: arg1.title || arg1.name || arg1.query || meta.title || meta.name || "",
+      title:
+        arg1.title ||
+        arg1.name ||
+        arg1.query ||
+        arg1.seriesTitle ||
+        meta.title ||
+        meta.name ||
+        "",
       year: arg1.year || arg1.releaseYear || meta.year || null,
     };
   }
@@ -504,12 +531,17 @@ function parseInvocationParams(arg1, arg2, arg3, arg4, arg5) {
   const meta = cfg.meta || cfg.metadata || {};
   const rawId = arg1 != null ? String(arg1) : "";
   const isImdb = /^tt\d+/i.test(rawId);
+  const tmdbFromPrefix = /^tmdb:(\d+)$/i.exec(rawId)?.[1] || null;
+  const tmdbId =
+    extractTmdbId(cfg, meta) ||
+    tmdbFromPrefix ||
+    (!isImdb && /^\d+$/.test(rawId) ? rawId : null);
 
   return {
     anilistId: cfg.anilistId || meta.anilistId || null,
     malId: cfg.malId || cfg.idMal || meta.malId || null,
-    tmdbId: !isImdb && /^\d+$/.test(rawId) ? rawId : cfg.tmdbId || null,
-    imdbId: isImdb ? rawId : cfg.imdbId || null,
+    tmdbId,
+    imdbId: isImdb ? rawId : cfg.imdbId || meta.imdbId || null,
     id: rawId || null,
     mediaType: arg2 || cfg.mediaType || null,
     season: Number(arg3 ?? cfg.season ?? 1) || 1,
@@ -753,6 +785,7 @@ async function getStreams(arg1, arg2, arg3, arg4, arg5) {
             : [];
 
           streams.push({
+            id: `anichan-${category}-${tier}-${srv.name || streams.length}`,
             name: `AniChan (${category.toUpperCase()})`,
             title: `${srv.label || srv.name || "HLS"} · ${category.toUpperCase()} · ${tier}`,
             url: streamUrl,
@@ -760,6 +793,15 @@ async function getStreams(arg1, arg2, arg3, arg4, arg5) {
             headers: {
               "User-Agent": UA,
               Referer: `${BASE}/`,
+            },
+            behaviorHints: {
+              notWebReady: false,
+              proxyHeaders: {
+                request: {
+                  "User-Agent": UA,
+                  Referer: `${BASE}/`,
+                },
+              },
             },
             subtitles,
           });
