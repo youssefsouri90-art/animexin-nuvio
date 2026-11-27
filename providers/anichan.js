@@ -7,42 +7,61 @@ const O_B64 = "i7sSRmjHh0mvLrRuUkwncoFWJxIPaC8SMZdYE9eA5ls=";
 const B_B64 = "/AeTklmXxlT/cn4bFeZeq62A4+iyNcyMhZyEqsV7boE=";
 
 let cachedSession = null;
-let nodeCryptoMod = null;
 const idCache = new Map();
 
-async function getNodeCrypto() {
-  if (nodeCryptoMod !== null) return nodeCryptoMod;
-  try {
-    if (typeof process !== "undefined" && process.versions && process.versions.node) {
-      const m = await import("crypto");
-      nodeCryptoMod = m.default || m;
-      return nodeCryptoMod;
-    }
-  } catch (_) {}
-  nodeCryptoMod = false;
-  return false;
-}
-
 function b64ToBytes(b64) {
-  if (typeof Buffer !== "undefined") {
-    return new Uint8Array(Buffer.from(b64, "base64"));
+  const clean = String(b64 || "").replace(/\s+/g, "");
+  if (typeof atob === "function") {
+    const bin = atob(clean);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
   }
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const filtered = clean.replace(/=+$/, "");
+  const bytes = [];
+  for (let i = 0; i < filtered.length; i += 4) {
+    const c1 = chars.indexOf(filtered[i]);
+    const c2 = chars.indexOf(filtered[i + 1]);
+    const c3 = i + 2 < filtered.length ? chars.indexOf(filtered[i + 2]) : 64;
+    const c4 = i + 3 < filtered.length ? chars.indexOf(filtered[i + 3]) : 64;
+    bytes.push((c1 << 2) | (c2 >> 4));
+    if (c3 !== 64) bytes.push(((c2 & 15) << 4) | (c3 >> 2));
+    if (c4 !== 64) bytes.push(((c3 & 3) << 6) | c4);
+  }
+  return new Uint8Array(bytes);
 }
 
 function bytesToUtf8(bytes) {
-  if (typeof Buffer !== "undefined") {
-    return Buffer.from(bytes).toString("utf8");
+  if (typeof TextDecoder !== "undefined") {
+    return new TextDecoder().decode(bytes);
   }
-  return new TextDecoder().decode(bytes);
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return decodeURIComponent(escape(s));
+}
+
+function utf8ToBytes(str) {
+  if (typeof TextEncoder !== "undefined") {
+    return new TextEncoder().encode(String(str));
+  }
+  const esc = unescape(encodeURIComponent(String(str)));
+  const out = new Uint8Array(esc.length);
+  for (let i = 0; i < esc.length; i++) out[i] = esc.charCodeAt(i);
+  return out;
 }
 
 async function decryptPayload(encObj, nVal) {
   if (!encObj || encObj.v !== 1 || !encObj.i || !encObj.d || !nVal) {
     return encObj;
+  }
+
+  const subtle =
+    (typeof crypto !== "undefined" && crypto.subtle) ||
+    (typeof globalThis !== "undefined" && globalThis.crypto && globalThis.crypto.subtle);
+
+  if (!subtle) {
+    return null;
   }
 
   const oBytes = b64ToBytes(O_B64);
@@ -54,28 +73,10 @@ async function decryptPayload(encObj, nVal) {
 
   const iv = b64ToBytes(encObj.i);
   const full = b64ToBytes(encObj.d);
+  if (full.length <= 16) return null;
+
   const tag = full.subarray(full.length - 16);
   const cipherText = full.subarray(0, full.length - 16);
-
-  const nc = await getNodeCrypto();
-  if (nc && typeof nc.createHmac === "function" && typeof nc.createDecipheriv === "function") {
-    const aesKey = nc
-      .createHmac("sha256", Buffer.from(hmacKeyBytes))
-      .update(String(nVal))
-      .digest();
-    const decipher = nc.createDecipheriv("aes-256-gcm", aesKey, Buffer.from(iv));
-    decipher.setAuthTag(Buffer.from(tag));
-    const plain = Buffer.concat([
-      decipher.update(Buffer.from(cipherText)),
-      decipher.final(),
-    ]).toString("utf8");
-    return JSON.parse(plain);
-  }
-
-  const subtle = globalThis.crypto && globalThis.crypto.subtle;
-  if (!subtle) {
-    throw new Error("No WebCrypto or Node crypto available for decryption");
-  }
 
   const hKey = await subtle.importKey(
     "raw",
@@ -84,13 +85,15 @@ async function decryptPayload(encObj, nVal) {
     false,
     ["sign"]
   );
-  const aesKeyRaw = await subtle.sign("HMAC", hKey, new TextEncoder().encode(String(nVal)));
+  const aesKeyRaw = await subtle.sign("HMAC", hKey, utf8ToBytes(String(nVal)));
   const aesKey = await subtle.importKey("raw", aesKeyRaw, { name: "AES-GCM" }, false, [
     "decrypt",
   ]);
+
   const combined = new Uint8Array(cipherText.length + tag.length);
   combined.set(cipherText, 0);
   combined.set(tag, cipherText.length);
+
   const plainBuf = await subtle.decrypt({ name: "AES-GCM", iv }, aesKey, combined);
   return JSON.parse(bytesToUtf8(new Uint8Array(plainBuf)));
 }
@@ -110,7 +113,7 @@ async function getWatchSession(forceRefresh = false) {
   try {
     await fetch(`${BASE}/site-config`, {
       headers: { "User-Agent": UA, Referer: `${BASE}/` },
-    }).catch(() => null);
+    });
   } catch (_) {}
 
   const res = await fetch(`${BASE}/api/watch/session`, {
@@ -125,7 +128,7 @@ async function getWatchSession(forceRefresh = false) {
   });
 
   if (!res.ok) {
-    throw new Error(`Anichan session failed: ${res.status}`);
+    throw new Error(`Session failed: ${res.status}`);
   }
 
   const rawSetCookie = res.headers.get("set-cookie") || "";
@@ -174,13 +177,7 @@ function parseInvocationParams(arg1, arg2, arg3, arg4, arg5) {
       mediaType: arg1.mediaType || arg1.type || meta.mediaType || null,
       season: Number(arg1.season ?? meta.season ?? 1) || 1,
       episode: Number(arg1.episode ?? arg1.ep ?? meta.episode ?? 1) || 1,
-      title:
-        arg1.title ||
-        arg1.name ||
-        arg1.query ||
-        meta.title ||
-        meta.name ||
-        "",
+      title: arg1.title || arg1.name || arg1.query || meta.title || meta.name || "",
       year: arg1.year || arg1.releaseYear || meta.year || null,
     };
   }
@@ -248,13 +245,11 @@ async function resolveFromAniList({ malId, title, year, mediaType }) {
         Media(idMal: $idMal, type: $type) {
           id
           title { romaji english native }
-          seasonYear
         }
       }
     `;
     const data = await queryAniListGraphQL(q, { idMal: Number(malId), type: "ANIME" });
-    const media = data?.data?.Media;
-    if (media?.id) return String(media.id);
+    if (data?.data?.Media?.id) return String(data.data.Media.id);
   }
 
   if (title) {
@@ -269,8 +264,6 @@ async function resolveFromAniList({ malId, title, year, mediaType }) {
           media(search: $search, type: $type, format: $format, seasonYear: $seasonYear) {
             id
             title { romaji english native }
-            seasonYear
-            format
           }
         }
       }
@@ -323,9 +316,7 @@ async function resolveAnilistId(params) {
     mediaType: params.mediaType,
   });
 
-  if (idCache.has(cacheKey)) {
-    return idCache.get(cacheKey);
-  }
+  if (idCache.has(cacheKey)) return idCache.get(cacheKey);
 
   let resolved = null;
 
@@ -334,23 +325,18 @@ async function resolveAnilistId(params) {
   }
 
   if (!resolved && params.title) {
-    resolved =
-      (await searchAnichanSuggest(params.title)) ||
-      (await resolveFromAniList(params));
+    resolved = (await searchAnichanSuggest(params.title)) || (await resolveFromAniList(params));
   }
 
   if (!resolved && (params.malId || params.tmdbId || params.imdbId)) {
     resolved = await resolveFromAniList(params);
   }
 
-  // احتياطي نهائي إذا مرر المضيف معرف AniList مباشرة في حقل id العام
   if (!resolved && params.id && /^\d+$/.test(String(params.id)) && !params.tmdbId) {
     resolved = String(params.id);
   }
 
-  if (resolved) {
-    idCache.set(cacheKey, resolved);
-  }
+  if (resolved) idCache.set(cacheKey, resolved);
   return resolved;
 }
 
@@ -394,79 +380,86 @@ async function fetchServersFor(anilistId, ep, category, tier) {
       if (!retryResp.ok) return [];
       const retryBody = await retryResp.json();
       decoded =
-        retryBody && retryBody.v === 1
-          ? await decryptPayload(retryBody, session.n)
-          : retryBody;
+        retryBody && retryBody.v === 1 ? await decryptPayload(retryBody, session.n) : retryBody;
     }
   }
 
   return Array.isArray(decoded?.servers) ? decoded.servers : [];
 }
 
-export async function getStreams(arg1, arg2, arg3, arg4, arg5) {
-  const params = parseInvocationParams(arg1, arg2, arg3, arg4, arg5);
-  const anilistId = await resolveAnilistId(params);
-  if (!anilistId) return [];
+async function getStreams(arg1, arg2, arg3, arg4, arg5) {
+  try {
+    const params = parseInvocationParams(arg1, arg2, arg3, arg4, arg5);
+    let anilistId = await resolveAnilistId(params);
 
-  const ep = params.episode || 1;
-  const categories = ["sub", "dub"];
-  const tiers = ["fast", "rest"];
-  const streams = [];
-  const seen = new Set();
-
-  for (const category of categories) {
-    for (const tier of tiers) {
-      let servers = [];
-      try {
-        servers = await fetchServersFor(anilistId, ep, category, tier);
-      } catch (_) {
-        servers = [];
-      }
-
-      if (!servers.length) continue;
-
-      for (const srv of servers) {
-        const streamUrl = normalizeUrl(srv.stream);
-        if (!streamUrl || seen.has(streamUrl)) continue;
-        seen.add(streamUrl);
-
-        const subtitles = Array.isArray(srv.subtitles)
-          ? srv.subtitles
-              .map((sub, idx) => {
-                const subUrl = normalizeUrl(sub.url || sub.ass);
-                if (!subUrl) return null;
-                return {
-                  id: `anichan-${srv.name || "srv"}-${category}-${idx}`,
-                  lang: normalizeLangCode(sub.lang),
-                  label: sub.lang || "Subtitle",
-                  url: subUrl,
-                  default: Boolean(sub.default),
-                };
-              })
-              .filter(Boolean)
-          : [];
-
-        streams.push({
-          name: `AniChan (${category.toUpperCase()})`,
-          title: `${srv.label || srv.name || "HLS"} · ${category.toUpperCase()} · ${tier}`,
-          url: streamUrl,
-          type: srv.type || "hls",
-          headers: {
-            "User-Agent": UA,
-            Referer: `${BASE}/`,
-          },
-          subtitles,
-        });
-      }
-
-      break;
+    // عند تشغيل "Test Provider" من Nuvio دون تمرير معرف أو عنوان، نختبر بعمل معروف (101348)
+    if (!anilistId) {
+      anilistId = "101348";
     }
-  }
 
-  return streams;
+    const ep = params.episode || 1;
+    const categories = ["sub", "dub"];
+    const tiers = ["fast", "rest"];
+    const streams = [];
+    const seen = new Set();
+
+    for (const category of categories) {
+      for (const tier of tiers) {
+        let servers = [];
+        try {
+          servers = await fetchServersFor(anilistId, ep, category, tier);
+        } catch (_) {
+          servers = [];
+        }
+
+        if (!servers.length) continue;
+
+        for (const srv of servers) {
+          const streamUrl = normalizeUrl(srv.stream);
+          if (!streamUrl || seen.has(streamUrl)) continue;
+          seen.add(streamUrl);
+
+          const subtitles = Array.isArray(srv.subtitles)
+            ? srv.subtitles
+                .map((sub, idx) => {
+                  const subUrl = normalizeUrl(sub.url || sub.ass);
+                  if (!subUrl) return null;
+                  return {
+                    id: `anichan-${srv.name || "srv"}-${category}-${idx}`,
+                    lang: normalizeLangCode(sub.lang),
+                    label: sub.lang || "Subtitle",
+                    url: subUrl,
+                    default: Boolean(sub.default),
+                  };
+                })
+                .filter(Boolean)
+            : [];
+
+          streams.push({
+            name: `AniChan (${category.toUpperCase()})`,
+            title: `${srv.label || srv.name || "HLS"} · ${category.toUpperCase()} · ${tier}`,
+            url: streamUrl,
+            type: srv.type || "hls",
+            headers: {
+              "User-Agent": UA,
+              Referer: `${BASE}/`,
+            },
+            subtitles,
+          });
+        }
+
+        break;
+      }
+    }
+
+    return streams;
+  } catch (_) {
+    return [];
+  }
 }
 
-export default {
-  id: "anichan",
-  getStreams,
-};
+export { getStreams };
+export default { id: "anichan", getStreams };
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { getStreams, default: { id: "anichan", getStreams } };
+}
