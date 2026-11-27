@@ -133,7 +133,7 @@ var AES_SBOX = [
 ];
 
 var AES_INV_SBOX = (function () {
-  var inv = new Uint8Array(256);
+  var inv = new Array(256);
   for (var i = 0; i < 256; i++) inv[AES_SBOX[i]] = i;
   return inv;
 })();
@@ -153,8 +153,7 @@ function gmul(a, b) {
 }
 
 function aes256KeyExpansion(keyBytes) {
-  // keyBytes length = 32 -> 60 words (240 bytes)
-  var w = new Uint32Array(60);
+  var w = new Array(60);
   for (var i = 0; i < 8; i++) {
     w[i] =
       ((keyBytes[4 * i] << 24) |
@@ -162,29 +161,28 @@ function aes256KeyExpansion(keyBytes) {
         (keyBytes[4 * i + 2] << 8) |
         keyBytes[4 * i + 3]) >>> 0;
   }
-  for (var i = 8; i < 60; i++) {
-    var temp = w[i - 1];
-    if (i % 8 === 0) {
+  for (var j = 8; j < 60; j++) {
+    var temp = w[j - 1];
+    if (j % 8 === 0) {
       temp =
         ((AES_SBOX[(temp >>> 16) & 0xff] << 24) |
           (AES_SBOX[(temp >>> 8) & 0xff] << 16) |
           (AES_SBOX[temp & 0xff] << 8) |
           AES_SBOX[(temp >>> 24) & 0xff]) >>> 0;
-      temp ^= AES_RCON[i / 8] << 24;
-    } else if (i % 8 === 4) {
+      temp ^= AES_RCON[j / 8] << 24;
+    } else if (j % 8 === 4) {
       temp =
         ((AES_SBOX[(temp >>> 24) & 0xff] << 24) |
           (AES_SBOX[(temp >>> 16) & 0xff] << 16) |
           (AES_SBOX[(temp >>> 8) & 0xff] << 8) |
           AES_SBOX[temp & 0xff]) >>> 0;
     }
-    w[i] = (w[i - 8] ^ temp) >>> 0;
+    w[j] = (w[j - 8] ^ temp) >>> 0;
   }
   return w;
 }
 
 function aes256DecryptBlock(block, w) {
-  // block is 16-byte Uint8Array, state[col][row]
   var s = [
     [block[0], block[1], block[2], block[3]],
     [block[4], block[5], block[6], block[7]],
@@ -194,7 +192,7 @@ function aes256DecryptBlock(block, w) {
 
   function addRoundKey(round) {
     for (var c = 0; c < 4; c++) {
-      var word = w[(round * 4 + c)];
+      var word = w[round * 4 + c];
       s[c][0] ^= (word >>> 24) & 0xff;
       s[c][1] ^= (word >>> 16) & 0xff;
       s[c][2] ^= (word >>> 8) & 0xff;
@@ -204,12 +202,9 @@ function aes256DecryptBlock(block, w) {
 
   function invShiftRows() {
     var t;
-    // row 1: shift right by 1
     t = s[3][1]; s[3][1] = s[2][1]; s[2][1] = s[1][1]; s[1][1] = s[0][1]; s[0][1] = t;
-    // row 2: shift right by 2
     t = s[2][2]; s[2][2] = s[0][2]; s[0][2] = t;
     t = s[3][2]; s[3][2] = s[1][2]; s[1][2] = t;
-    // row 3: shift right by 3 (= left by 1)
     t = s[0][3]; s[0][3] = s[1][3]; s[1][3] = s[2][3]; s[2][3] = s[3][3]; s[3][3] = t;
   }
 
@@ -242,39 +237,44 @@ function aes256DecryptBlock(block, w) {
   invSubBytes();
   addRoundKey(0);
 
-  var out = new Uint8Array(16);
-  for (var c = 0; c < 4; c++) {
-    out[4 * c] = s[c][0];
-    out[4 * c + 1] = s[c][1];
-    out[4 * c + 2] = s[c][2];
-    out[4 * c + 3] = s[c][3];
-  }
-  return out;
+  return [
+    s[0][0], s[0][1], s[0][2], s[0][3],
+    s[1][0], s[1][1], s[1][2], s[1][3],
+    s[2][0], s[2][1], s[2][2], s[2][3],
+    s[3][0], s[3][1], s[3][2], s[3][3],
+  ];
 }
 
 function padBytes(str, len) {
-  var out = new Uint8Array(len);
+  var out = new Array(len);
   var s = String(str || "");
-  for (var i = 0; i < Math.min(len, s.length); i++) {
-    out[i] = s.charCodeAt(i) & 0xff;
+  for (var i = 0; i < len; i++) {
+    out[i] = i < s.length ? s.charCodeAt(i) & 0xff : 0;
   }
   return out;
 }
 
 function decryptMegaPlayEnc(encStr) {
-  if (!encStr) return null;
+  if (!encStr) {
+    DIAG.push("no_enc");
+    return null;
+  }
   var cipherBytes = decodeBase64UrlBytes(encStr);
-  if (!cipherBytes.length || cipherBytes.length % 16 !== 0) return null;
+  if (!cipherBytes.length || cipherBytes.length % 16 !== 0) {
+    DIAG.push("enc_len:" + cipherBytes.length);
+    return null;
+  }
 
   var key = padBytes(SOURCE_ENC_KEY, 32);
   var iv = padBytes(SOURCE_ENC_IV, 16);
   var w = aes256KeyExpansion(key);
 
-  var plain = new Uint8Array(cipherBytes.length);
+  var plain = new Array(cipherBytes.length);
   var prev = iv;
 
   for (var off = 0; off < cipherBytes.length; off += 16) {
-    var block = cipherBytes.subarray(off, off + 16);
+    var block = new Array(16);
+    for (var b = 0; b < 16; b++) block[b] = cipherBytes[off + b];
     var decBlock = aes256DecryptBlock(block, w);
     for (var j = 0; j < 16; j++) {
       plain[off + j] = decBlock[j] ^ prev[j];
@@ -283,9 +283,15 @@ function decryptMegaPlayEnc(encStr) {
   }
 
   var padLen = plain[plain.length - 1];
-  if (padLen < 1 || padLen > 16) return null;
+  if (padLen < 1 || padLen > 16) {
+    DIAG.push("pad_err:" + padLen);
+    return null;
+  }
   for (var k = plain.length - padLen; k < plain.length; k++) {
-    if (plain[k] !== padLen) return null;
+    if (plain[k] !== padLen) {
+      DIAG.push("pad_mismatch");
+      return null;
+    }
   }
 
   var text = "";
@@ -296,6 +302,7 @@ function decryptMegaPlayEnc(encStr) {
   try {
     return JSON.parse(text);
   } catch (e) {
+    DIAG.push("json_err");
     return null;
   }
 }
@@ -411,6 +418,11 @@ async function resolveTarget(rawId, mediaType, season, episode) {
   }
 
   var details = await withTimeout(tmdbJson((isTv ? "tv/" : "movie/") + tmdbId), 4500);
+  if (!details) {
+    details = await withTimeout(tmdbJson((isTv ? "movie/" : "tv/") + tmdbId), 4500);
+    if (details) isTv = !isTv;
+  }
+
   var mainTitle =
     (details && (details.name || details.title || details.original_name || details.original_title)) || "";
   var candidates = [mainTitle].concat(extraTitles).filter(Boolean);
@@ -601,11 +613,17 @@ async function resolveMegaPlayMirror(mirrorUrl) {
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       }),
     });
-    if (!r || !r.ok) return res;
+    if (!r || !r.ok) {
+      DIAG.push("mp_page:" + (r ? r.status : "0"));
+      return res;
+    }
     var html = await r.text();
 
     var dataIdMatch = /data-id=["'](\d+)["']/i.exec(html);
-    if (!dataIdMatch) return res;
+    if (!dataIdMatch) {
+      DIAG.push("mp_no_id");
+      return res;
+    }
     var dataId = dataIdMatch[1];
 
     var baseMatch = /base_url\s*:\s*['"]([^'"]+)['"]/i.exec(html);
@@ -628,10 +646,16 @@ async function resolveMegaPlayMirror(mirrorUrl) {
         Accept: "application/json, text/plain, */*",
       }),
     });
-    if (!apiRes || !apiRes.ok) return res;
+    if (!apiRes || !apiRes.ok) {
+      DIAG.push("mp_api:" + (apiRes ? apiRes.status : "0"));
+      return res;
+    }
 
     var data = await apiRes.json();
-    if (!data) return res;
+    if (!data) {
+      DIAG.push("mp_empty_json");
+      return res;
+    }
 
     if (Array.isArray(data.tracks)) {
       for (var i = 0; i < data.tracks.length; i++) {
@@ -656,6 +680,8 @@ async function resolveMegaPlayMirror(mirrorUrl) {
           fileUrl += (fileUrl.indexOf("?") >= 0 ? "&" : "?") + "t=" + encodeURIComponent(st);
         }
         res.streams.push(fileUrl);
+      } else {
+        DIAG.push("mp_dec_fail");
       }
     }
 
@@ -666,7 +692,9 @@ async function resolveMegaPlayMirror(mirrorUrl) {
         if (sUrl) res.streams.push(decodeHtmlEntities(sUrl));
       }
     }
-  } catch (e) {}
+  } catch (e) {
+    DIAG.push("mp_err:" + String((e && e.message) || "err").slice(0, 16));
+  }
 
   return res;
 }
