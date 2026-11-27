@@ -817,8 +817,18 @@ async function getStreams(arg1, arg2, arg3, arg4, arg5) {
   }
 }
 
-export { getStreams, aes256GcmDecryptPure, hmacSha256Pure };
-export default { id: "anichan", getStreams };
+if (typeof globalThis !== "undefined") {
+  globalThis.getStreams = getStreams;
+  globalThis.anichan = { id: "anichan", getStreams, aes256GcmDecryptPure, hmacSha256Pure };
+}
+if (typeof window !== "undefined") {
+  window.getStreams = getStreams;
+  window.anichan = { id: "anichan", getStreams, aes256GcmDecryptPure, hmacSha256Pure };
+}
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { getStreams, aes256GcmDecryptPure, hmacSha256Pure, default: { id: "anichan", getStreams } };
+  module.exports = getStreams;
+  module.exports.getStreams = getStreams;
+  module.exports.default = { id: "anichan", getStreams };
+  module.exports.aes256GcmDecryptPure = aes256GcmDecryptPure;
+  module.exports.hmacSha256Pure = hmacSha256Pure;
 }
