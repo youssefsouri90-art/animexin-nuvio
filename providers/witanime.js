@@ -1,5 +1,3 @@
-rm -rf jadx_debug_out
-cat << 'EOF' > witanime.js
 const MAIN_URL = "https://witanime.site";
 const YONAPLAY_ORIGIN = "https://mid.yonaplay.net";
 const REQUEST_TIMEOUT_MS = 4500;
@@ -14,17 +12,17 @@ const BASE_HEADERS = {
   Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 };
 
-const animeSearchCache = new Map();
+const searchCache = new Map();
 const episodesCache = new Map();
 
 function getCached(cache, key) {
-  const entry = cache.get(key);
-  if (!entry) return null;
-  if (Date.now() > entry.exp) {
+  const item = cache.get(key);
+  if (!item) return null;
+  if (Date.now() > item.exp) {
     cache.delete(key);
     return null;
   }
-  return entry.value;
+  return item.value;
 }
 
 function setCached(cache, key, value, ttlMs = CACHE_TTL_MS) {
@@ -56,86 +54,67 @@ function toAbsoluteUrl(rawUrl, base = MAIN_URL) {
 
 function base64ToBytes(b64) {
   const clean = String(b64).trim().replace(/\s+/g, "");
-  if (typeof atob === "function") {
-    const bin = atob(clean);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
+  if (typeof atob !== "function") return new Uint8Array(0);
+  const bin = atob(clean);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    bytes[i] = bin.charCodeAt(i);
   }
-  return new Uint8Array(0);
+  return bytes;
 }
 
 async function sha256Bytes(text) {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(String(text));
-  if (typeof crypto !== "undefined" && crypto.subtle) {
-    const hashBuf = await crypto.subtle.digest("SHA-256", data);
-    return new Uint8Array(hashBuf);
+  const encoded = new TextEncoder().encode(String(text));
+  if (!globalThis.crypto || !globalThis.crypto.subtle) {
+    throw new Error("WebCrypto subtle unavailable");
   }
-  const nodeCrypto = await import("node:crypto");
-  return new Uint8Array(nodeCrypto.createHash("sha256").update(data).digest());
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", encoded);
+  return new Uint8Array(digest);
 }
 
-async function aes256GcmDecrypt(keyBytes, ivBytes, tagBytes, cipherBytes) {
-  const ctWithTag = new Uint8Array(cipherBytes.length + tagBytes.length);
-  ctWithTag.set(cipherBytes, 0);
-  ctWithTag.set(tagBytes, cipherBytes.length);
+async function decryptYonaPlayAesGcm(b64Data, pageKey) {
+  if (!b64Data || !pageKey) return null;
+  try {
+    if (!globalThis.crypto || !globalThis.crypto.subtle) return null;
+    const keyBytes = await sha256Bytes(pageKey);
+    const raw = base64ToBytes(b64Data);
+    if (raw.length <= 28) return null;
 
-  if (typeof crypto !== "undefined" && crypto.subtle) {
-    const cryptoKey = await crypto.subtle.importKey(
+    const iv = raw.slice(0, 12);
+    const tag = raw.slice(12, 28);
+    const cipherText = raw.slice(28);
+
+    const payloadWithTag = new Uint8Array(cipherText.length + tag.length);
+    payloadWithTag.set(cipherText, 0);
+    payloadWithTag.set(tag, cipherText.length);
+
+    const cryptoKey = await globalThis.crypto.subtle.importKey(
       "raw",
       keyBytes,
       { name: "AES-GCM" },
       false,
       ["decrypt"]
     );
-    const plainBuf = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: ivBytes, tagLength: 128 },
+
+    const decryptedBuffer = await globalThis.crypto.subtle.decrypt(
+      { name: "AES-GCM", iv, tagLength: 128 },
       cryptoKey,
-      ctWithTag
+      payloadWithTag
     );
-    return new TextDecoder("utf-8").decode(new Uint8Array(plainBuf)).trim();
-  }
 
-  const nodeCrypto = await import("node:crypto");
-  const decipher = nodeCrypto.createDecipheriv(
-    "aes-256-gcm",
-    Buffer.from(keyBytes),
-    Buffer.from(ivBytes)
-  );
-  decipher.setAuthTag(Buffer.from(tagBytes));
-  const out = Buffer.concat([
-    decipher.update(Buffer.from(cipherBytes)),
-    decipher.final(),
-  ]);
-  return out.toString("utf8").trim();
-}
-
-async function decryptYonaPlayAesGcm(b64Data, pageKey) {
-  if (!b64Data || !pageKey) return null;
-  try {
-    const keyBytes = await sha256Bytes(pageKey);
-    const raw = base64ToBytes(b64Data);
-    // 12 bytes IV + 16 bytes Auth Tag + ciphertext
-    if (raw.length <= 28) return null;
-
-    const iv = raw.slice(0, 12);
-    const tag = raw.slice(12, 28);
-    const ciphertext = raw.slice(28);
-
-    return await aes256GcmDecrypt(keyBytes, iv, tag, ciphertext);
+    return new TextDecoder("utf-8").decode(new Uint8Array(decryptedBuffer)).trim();
   } catch {
     return null;
   }
 }
 
-function normalizeSubtitle(subUrl, lang = "ar", label = "Arabic", index = 0) {
+function normalizeSubtitle(subUrl, lang = "ar", label = "Arabic", idx = 0) {
   const fullUrl = toAbsoluteUrl(subUrl, YONAPLAY_ORIGIN);
   if (!fullUrl) return null;
   const code = String(lang || "ar").toLowerCase();
   const displayName = label || (code === "ar" ? "Arabic" : code.toUpperCase());
   return {
-    id: "witanime-sub-" + index,
+    id: "witanime-sub-" + idx,
     name: displayName,
     lang: code,
     language: displayName,
@@ -144,13 +123,13 @@ function normalizeSubtitle(subUrl, lang = "ar", label = "Arabic", index = 0) {
   };
 }
 
-function normalizeQualityLabel(qKey) {
-  const upper = String(qKey || "").toUpperCase();
-  if (upper.includes("4K") || upper.includes("2160")) return "2160p";
-  if (upper.includes("FHD") || upper.includes("1080")) return "1080p";
-  if (upper.includes("HD") || upper.includes("720")) return "720p";
-  if (upper.includes("SD") || upper.includes("480")) return "480p";
-  return qKey || "Auto";
+function normalizeQuality(rawQuality) {
+  const q = String(rawQuality || "").toUpperCase();
+  if (q.includes("4K") || q.includes("2160")) return "2160p";
+  if (q.includes("FHD") || q.includes("1080")) return "1080p";
+  if (q.includes("HD") || q.includes("720")) return "720p";
+  if (q.includes("SD") || q.includes("480")) return "480p";
+  return rawQuality || "Auto";
 }
 
 async function buildStreamsFromYonaPlay({
@@ -168,19 +147,19 @@ async function buildStreamsFromYonaPlay({
     Referer: toAbsoluteUrl(referer, YONAPLAY_ORIGIN) || YONAPLAY_ORIGIN + "/",
   };
 
-  const seen = new Set();
   const streams = [];
+  const seenUrls = new Set();
 
-  const pushStream = (url, serverName, rawQuality) => {
+  const addStream = (url, serverName, rawQuality) => {
     const fullUrl = toAbsoluteUrl(url, YONAPLAY_ORIGIN);
-    if (!fullUrl || !/^https?:\/\//i.test(fullUrl) || seen.has(fullUrl)) return;
-    seen.add(fullUrl);
+    if (!fullUrl || !/^https?:\/\//i.test(fullUrl) || seenUrls.has(fullUrl)) return;
+    seenUrls.add(fullUrl);
 
-    const quality = normalizeQualityLabel(rawQuality);
-    const srv = serverName || "YonaPlay";
+    const quality = normalizeQuality(rawQuality);
+    const server = serverName || "YonaPlay";
     streams.push({
       name: "WitAnime (" + verTag + ")",
-      title: srv + " · " + verTag + " · " + quality,
+      title: server + " · " + verTag + " · " + quality,
       quality,
       url: fullUrl,
       headers,
@@ -189,7 +168,7 @@ async function buildStreamsFromYonaPlay({
   };
 
   if (/^https?:\/\//i.test(plain)) {
-    pushStream(plain, "YonaPlay", "Auto");
+    addStream(plain, "YonaPlay", "Auto");
     return streams;
   }
 
@@ -201,10 +180,10 @@ async function buildStreamsFromYonaPlay({
   }
 
   const subtitles = [];
-  const rawSub = parsed?.subUrl || parsed?.subtitle || parsed?.sub;
-  if (typeof rawSub === "string" && rawSub.trim()) {
+  const subRaw = parsed?.subUrl || parsed?.subtitle || parsed?.sub;
+  if (typeof subRaw === "string" && subRaw.trim()) {
     const subObj = normalizeSubtitle(
-      rawSub,
+      subRaw,
       parsed?.subLang || "ar",
       parsed?.subLabel || "Arabic",
       0
@@ -218,11 +197,11 @@ async function buildStreamsFromYonaPlay({
   if (pool && typeof pool === "object") {
     for (const [qKey, entry] of Object.entries(pool)) {
       if (typeof entry === "string") {
-        pushStream(entry, "YonaPlay", qKey);
+        addStream(entry, "YonaPlay", qKey);
       } else if (entry && typeof entry === "object") {
         for (const [srvName, link] of Object.entries(entry)) {
           if (typeof link === "string") {
-            pushStream(link, srvName, qKey);
+            addStream(link, srvName, qKey);
           }
         }
       }
@@ -230,43 +209,38 @@ async function buildStreamsFromYonaPlay({
   }
 
   if (subtitles.length > 0) {
-    for (const s of streams) {
-      s.subtitles = subtitles;
+    for (const item of streams) {
+      item.subtitles = subtitles;
     }
   }
 
   return streams;
 }
 
-function parseQueryAndEpisode(rawId, mediaType, season, episode) {
+function parseInput(rawId, mediaType, season, episode) {
   const isMovie = mediaType === "movie";
   const parsedEp = Number(episode);
   const epNum = isMovie ? 1 : parsedEp > 0 ? parsedEp : 1;
 
-  const str = String(rawId || "").trim();
-  let query = str;
+  const rawStr = String(rawId || "").trim();
+  let query = rawStr;
 
-  if (/^(tmdb|imdb|mal|kitsu)[:\-]/i.test(str) || /^tt\d+$/i.test(str)) {
-    const parts = str.split(":");
-    const mainPart = parts[0] || str;
-    if (parts.length >= 3 && !episode) {
-      const maybeEp = Number(parts[2]);
-      if (maybeEp > 0) query = mainPart;
-    }
-    query = mainPart.replace(/^(tmdb|mal|kitsu)[:\-]/i, "").trim();
+  if (/^(tmdb|imdb|mal|kitsu)[:\-]/i.test(rawStr) || /^tt\d+$/i.test(rawStr)) {
+    const firstPart = rawStr.split(":")[0] || rawStr;
+    query = firstPart.replace(/^(tmdb|mal|kitsu)[:\-]/i, "").trim();
   }
 
   return { query, epNum, isMovie };
 }
 
-async function searchWitAnime(query) {
+async function searchAnime(query) {
   const cleanQuery = String(query || "").trim();
   if (!cleanQuery || /^\d+$/.test(cleanQuery) || /^tt\d+$/i.test(cleanQuery)) {
     return [];
   }
 
   const cacheKey = cleanQuery.toLowerCase();
-  const cached = getCached(animeSearchCache, cacheKey);
+  const cached = getCached(searchCache, cacheKey);
   if (cached) return cached;
 
   const url =
@@ -277,26 +251,24 @@ async function searchWitAnime(query) {
   const html = await res.text();
   const results = [];
   const seen = new Set();
-  const linkRegex =
+  const regex =
     /<a[^>]+href=["'](https?:\/\/witanime\.site\/anime\/[^"']+|\/anime\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
 
-  for (const match of html.matchAll(linkRegex)) {
+  for (const match of html.matchAll(regex)) {
     const fullUrl = toAbsoluteUrl(match[1], MAIN_URL);
     if (!fullUrl || seen.has(fullUrl)) continue;
-    const text = match[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-    if (!text) continue;
+    const title = match[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    if (!title) continue;
     seen.add(fullUrl);
-    results.push({ title: text, url: fullUrl });
+    results.push({ title, url: fullUrl });
   }
 
-  setCached(animeSearchCache, cacheKey, results);
+  setCached(searchCache, cacheKey, results);
   return results;
 }
 
-async function findEpisodeWatchUrl(animeUrl, epNum) {
-  const cached = getCached(episodesCache, animeUrl);
-  let html = cached;
-
+async function resolveEpisodeWatchUrl(animeUrl, epNum) {
+  let html = getCached(episodesCache, animeUrl);
   if (!html) {
     const res = await fetchWithTimeout(animeUrl, { headers: BASE_HEADERS });
     if (!res.ok) return null;
@@ -304,7 +276,7 @@ async function findEpisodeWatchUrl(animeUrl, epNum) {
     setCached(episodesCache, animeUrl, html);
   }
 
-  const watchLinks = [];
+  const links = [];
   const seen = new Set();
   const regex =
     /<a[^>]+href=["'](https?:\/\/witanime\.site\/watch\/[^"']+|\/watch\/[^"']+)["'][^>]*>/gi;
@@ -314,22 +286,22 @@ async function findEpisodeWatchUrl(animeUrl, epNum) {
     if (!fullUrl || seen.has(fullUrl)) continue;
     if (/\/(sources|stream-|download-|app-webview)/i.test(fullUrl)) continue;
     seen.add(fullUrl);
-    watchLinks.push(fullUrl);
+    links.push(fullUrl);
   }
 
-  if (watchLinks.length === 0) return null;
+  if (!links.length) return null;
 
-  const targetSuffix = "/" + String(epNum);
-  const exact = watchLinks.find((u) => u.replace(/\/+$/, "").endsWith(targetSuffix));
-  return exact || watchLinks[0];
+  const suffix = "/" + String(epNum);
+  const matched = links.find((u) => u.replace(/\/+$/, "").endsWith(suffix));
+  return matched || links[0];
 }
 
-async function fetchEpisodeSources(watchUrl) {
+async function fetchSourcesManifest(watchUrl) {
   const res = await fetchWithTimeout(watchUrl, { headers: BASE_HEADERS });
   if (!res.ok) return null;
 
   const html = await res.text();
-  const csrf =
+  const csrfToken =
     html.match(
       /<meta[^>]+name=["']csrf-token["'][^>]+content=["']([^"']+)["']/i
     )?.[1] ?? "";
@@ -350,21 +322,21 @@ async function fetchEpisodeSources(watchUrl) {
     .filter(Boolean)
     .join("; ");
 
-  const postHeaders = {
+  const headers = {
     "User-Agent": USER_AGENT,
     Accept: "application/json",
-    "X-CSRF-TOKEN": csrf,
+    "X-CSRF-TOKEN": csrfToken,
     "X-Requested-With": "XMLHttpRequest",
     Origin: MAIN_URL,
     Referer: watchUrl,
   };
   if (cookieHeader) {
-    postHeaders.Cookie = cookieHeader;
+    headers.Cookie = cookieHeader;
   }
 
   const srcRes = await fetchWithTimeout(sourcesUrl, {
     method: "POST",
-    headers: postHeaders,
+    headers,
   });
 
   if (!srcRes.ok) return null;
@@ -382,30 +354,30 @@ async function getStreams(id, mediaType = "tv", season = 1, episode = 1) {
       return await buildStreamsFromYonaPlay(id);
     }
 
-    const { query, epNum } = parseQueryAndEpisode(id, mediaType, season, episode);
+    const { query, epNum } = parseInput(id, mediaType, season, episode);
     if (!query) return [];
 
-    const candidates = await searchWitAnime(query);
+    const candidates = await searchAnime(query);
     if (!candidates.length) return [];
 
-    const watchUrl = await findEpisodeWatchUrl(candidates[0].url, epNum);
+    const watchUrl = await resolveEpisodeWatchUrl(candidates[0].url, epNum);
     if (!watchUrl) return [];
 
-    const manifest = await fetchEpisodeSources(watchUrl);
+    const manifest = await fetchSourcesManifest(watchUrl);
     if (!manifest || typeof manifest !== "object") return [];
 
-    // في حال توفرت حمولات YonaPlay مشفرة ضمن الاستجابة مستقبلاً
     const streams = [];
-    const players = manifest.players && typeof manifest.players === "object"
-      ? Object.values(manifest.players).flat()
-      : [];
+    const players =
+      manifest.players && typeof manifest.players === "object"
+        ? Object.values(manifest.players).flat()
+        : [];
 
-    for (const entry of players) {
-      if (entry && entry.b64Data && entry.pageKey) {
+    for (const player of players) {
+      if (player && player.b64Data && player.pageKey) {
         const decoded = await buildStreamsFromYonaPlay({
-          b64Data: entry.b64Data,
-          pageKey: entry.pageKey,
-          version: entry.version || "SUB",
+          b64Data: player.b64Data,
+          pageKey: player.pageKey,
+          version: player.version || "SUB",
           referer: YONAPLAY_ORIGIN + "/",
         });
         streams.push(...decoded);
@@ -413,10 +385,10 @@ async function getStreams(id, mediaType = "tv", season = 1, episode = 1) {
     }
 
     const unique = [];
-    const seenUrls = new Set();
+    const seen = new Set();
     for (const s of streams) {
-      if (!s?.url || seenUrls.has(s.url)) continue;
-      seenUrls.add(s.url);
+      if (!s?.url || seen.has(s.url)) continue;
+      seen.add(s.url);
       unique.push(s);
     }
 
@@ -432,4 +404,3 @@ if (typeof globalThis !== "undefined") {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = { getStreams: getStreams };
 }
-EOF
