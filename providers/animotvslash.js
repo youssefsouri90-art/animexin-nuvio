@@ -565,44 +565,67 @@ function parseEpisodeEmbedMeta(epHtml, fallbackEpNum) {
   let anilistId = null;
   let episodeNum = Number(fallbackEpNum) || 1;
   let subOrDub = "sub";
+  let sourceKind = "hianime"; // "hianime" (HD2) or "animehub" (HD3)
+  let bestScore = -1;
 
   const optionRe =
-    /<option[^>]*value=["']([A-Za-z0-9+/=]{20,})["'][^>]*>([\s\S]*?)<\/option>/gi;
+    /<option[^>]*value=["']([A-Za-z0-9+/=]{16,})["'][^>]*>([\s\S]*?)<\/option>/gi;
   let m;
   while ((m = optionRe.exec(epHtml)) !== null) {
     const label = m[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     const decoded = decodeBase64Html(m[1]);
-    const srcMatch = /src=["']([^"'>]+)["']/i.exec(decoded);
-    const src = srcMatch ? srcMatch[1] : decoded;
+    if (/megaplay\.buzz/i.test(decoded)) continue;
 
-    const pathMatch = /\/(?:stream\/ani|anime)\/(\d+)\/(\d+)\/(sub|dub)/i.exec(src);
-    if (pathMatch) {
-      anilistId = pathMatch[1];
-      episodeNum = Number(pathMatch[2]) || episodeNum;
-      subOrDub = pathMatch[3].toLowerCase();
-      if (/vidnest/i.test(src) || /softsub/i.test(label)) break;
+    const vidMatch =
+      /https?:\/\/vidnest\.fun\/(anime|animepahe)\/(\d+)\/(\d+)\/(sub|dub)/i.exec(decoded);
+    if (vidMatch) {
+      const kind = vidMatch[1].toLowerCase() === "animepahe" ? "animehub" : "hianime";
+      const score = (kind === "hianime" ? 20 : 10) + (/softsub|hd2/i.test(label) ? 5 : 0);
+      if (score > bestScore) {
+        bestScore = score;
+        sourceKind = kind;
+        anilistId = vidMatch[2];
+        episodeNum = Number(vidMatch[3]) || episodeNum;
+        subOrDub = vidMatch[4].toLowerCase();
+      }
+      continue;
+    }
+
+    const watchMatch =
+      /https?:\/\/animotvslash\.ru\/watch\/(\d+)\/(\d+)\?lang=(sub|dub)/i.exec(decoded);
+    if (watchMatch && bestScore < 5) {
+      bestScore = 5;
+      sourceKind = "hianime";
+      anilistId = watchMatch[1];
+      episodeNum = Number(watchMatch[2]) || episodeNum;
+      subOrDub = watchMatch[3].toLowerCase();
     }
   }
 
   if (!anilistId) {
-    const anyMatch = /\/(?:stream\/ani|anime)\/(\d+)\/(\d+)\/(sub|dub)/i.exec(epHtml);
-    if (anyMatch) {
-      anilistId = anyMatch[1];
-      episodeNum = Number(anyMatch[2]) || episodeNum;
-      subOrDub = anyMatch[3].toLowerCase();
+    const anyVid = /vidnest\.fun\/(anime|animepahe)\/(\d+)\/(\d+)\/(sub|dub)/i.exec(epHtml);
+    if (anyVid) {
+      sourceKind = anyVid[1].toLowerCase() === "animepahe" ? "animehub" : "hianime";
+      anilistId = anyVid[2];
+      episodeNum = Number(anyVid[3]) || episodeNum;
+      subOrDub = anyVid[4].toLowerCase();
     }
   }
 
-  return { anilistId, episodeNum, subOrDub };
+  return { anilistId, episodeNum, subOrDub, sourceKind };
 }
 
-async function fetchVidnestStream(anilistId, episodeNum, subOrDub) {
+async function fetchVidnestStream(anilistId, episodeNum, subOrDub, preferredKind) {
   const mode = subOrDub === "dub" ? "dub" : "sub";
-  const endpoints = [
+  const allEps = [
     `${VIDNEST_API}/hianime/anime/${anilistId}/${episodeNum}/${mode}/hd-2`,
     `${VIDNEST_API}/animehub/${anilistId}/${episodeNum}/${mode}`,
     `${VIDNEST_API}/aniwave_hls/${anilistId}/${episodeNum}/${mode}`,
   ];
+  const endpoints =
+    preferredKind === "animehub"
+      ? [allEps[1], allEps[0], allEps[2]]
+      : allEps;
 
   for (let i = 0; i < endpoints.length; i++) {
     try {
@@ -688,7 +711,8 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     const result = await fetchVidnestStream(
       meta.anilistId,
       meta.episodeNum,
-      meta.subOrDub
+      meta.subOrDub,
+      meta.sourceKind
     );
     if (!result || !result.streamUrl) return [];
 
