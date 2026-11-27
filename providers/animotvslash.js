@@ -220,100 +220,52 @@ function sha256Bytes(msgBytes) {
   return out;
 }
 
-// --- Pure JS GF(2^128) & AES-256-GCM ---
-function gfMul(xHigh, xLow, yHigh, yLow) {
-  let zHigh = 0, zLow = 0;
-  let vHigh = xHigh, vLow = xLow;
-  for (let i = 0; i < 128; i++) {
-    const bit = (i < 64 ? (yHigh >>> (63 - i)) : (yLow >>> (95 - i))) & 1;
-    if (bit) {
-      zHigh ^= vHigh;
-      zLow ^= vLow;
-    }
-    const lsb = vLow & 1;
-    vLow = ((vLow >>> 1) | ((vHigh & 1) << 31)) >>> 0;
-    vHigh = (vHigh >>> 1) >>> 0;
-    if (lsb) {
-      vHigh ^= 0xe1000000;
-    }
-  }
-  return [zHigh >>> 0, zLow >>> 0];
-}
-
-function ghash(hBytes, aadBytes, ctBytes) {
-  const hv = new DataView(hBytes.buffer, hBytes.byteOffset, 16);
-  const hHigh = hv.getUint32(0, false);
-  const hLow = hv.getUint32(4, false);
-  let yHigh = 0, yLow = 0;
-
-  const feedBlock = (block16) => {
-    const bv = new DataView(block16.buffer, block16.byteOffset, 16);
-    yHigh = (yHigh ^ bv.getUint32(0, false)) >>> 0;
-    yLow = (yLow ^ bv.getUint32(4, false)) >>> 0;
-    const m1 = gfMul(yHigh, yLow, hHigh, hLow);
-    yHigh = m1[0]; yLow = m1[1];
-  };
-
-  const feedStream = (arr) => {
-    for (let i = 0; i < arr.length; i += 16) {
-      const blk = new Uint8Array(16);
-      blk.set(arr.subarray(i, Math.min(i + 16, arr.length)));
-      feedBlock(blk);
-    }
-  };
-
-  feedStream(aadBytes);
-  feedStream(ctBytes);
-
-  const lenBlk = new Uint8Array(16);
-  const lv = new DataView(lenBlk.buffer);
-  lv.setUint32(4, aadBytes.length * 8, false);
-  lv.setUint32(12, ctBytes.length * 8, false);
-  feedBlock(lenBlk);
-
-  const out = new Uint8Array(16);
-  const ov = new DataView(out.buffer);
-  ov.setUint32(0, yHigh, false);
-  ov.setUint32(4, yLow, false);
-  return out;
-}
-
-function aes256EncryptBlock(key32, block16) {
-  const RCON = [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
-  const SBOX = new Uint8Array(256);
+// --- Pure JS AES-256-GCM (NIST SP 800-38D compatible) ---
+const AES_SBOX = (() => {
+  const s = new Uint8Array(256);
   const xtime = (x) => ((x << 1) ^ ((x & 0x80) ? 0x1b : 0)) & 0xff;
   let p = 1, q = 1;
   for (let i = 0; i < 256; i++) {
-    let s = q ^ ((q << 1) & 0xff) ^ ((q << 2) & 0xff) ^ ((q << 3) & 0xff) ^ ((q << 4) & 0xff);
-    s = ((s >>> 8) ^ (s & 0xff) ^ 0x63) & 0xff;
-    SBOX[p] = s;
+    let t = q ^ ((q << 1) & 0xff) ^ ((q << 2) & 0xff) ^ ((q << 3) & 0xff) ^ ((q << 4) & 0xff);
+    t = ((t >>> 8) ^ (t & 0xff) ^ 0x63) & 0xff;
+    s[p] = t;
     p = (p ^ xtime(p)) & 0xff;
     q ^= xtime(q); q ^= xtime(q); q ^= xtime(q); q &= 0xff;
   }
-  SBOX[0] = 0x63;
+  s[0] = 0x63;
+  return s;
+})();
 
+const AES_RCON = [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
+
+function expandAes256Key(key32) {
   const w = new Uint32Array(60);
   const kv = new DataView(key32.buffer, key32.byteOffset, 32);
   for (let i = 0; i < 8; i++) w[i] = kv.getUint32(i * 4, false);
 
   const subWord = (word) =>
-    ((SBOX[(word >>> 24) & 0xff] << 24) |
-     (SBOX[(word >>> 16) & 0xff] << 16) |
-     (SBOX[(word >>> 8) & 0xff] << 8) |
-     SBOX[word & 0xff]) >>> 0;
+    ((AES_SBOX[(word >>> 24) & 0xff] << 24) |
+     (AES_SBOX[(word >>> 16) & 0xff] << 16) |
+     (AES_SBOX[(word >>> 8) & 0xff] << 8) |
+     AES_SBOX[word & 0xff]) >>> 0;
   const rotWord = (word) => (((word << 8) | (word >>> 24))) >>> 0;
 
   for (let i = 8; i < 60; i++) {
     let temp = w[i - 1];
-    if (i % 8 === 0) temp = (subWord(rotWord(temp)) ^ (RCON[i / 8] << 24)) >>> 0;
+    if (i % 8 === 0) temp = (subWord(rotWord(temp)) ^ (AES_RCON[i / 8] << 24)) >>> 0;
     else if (i % 8 === 4) temp = subWord(temp);
     w[i] = (w[i - 8] ^ temp) >>> 0;
   }
+  return w;
+}
 
-  let s0 = new DataView(block16.buffer, block16.byteOffset, 16).getUint32(0, false);
-  let s1 = new DataView(block16.buffer, block16.byteOffset, 16).getUint32(4, false);
-  let s2 = new DataView(block16.buffer, block16.byteOffset, 16).getUint32(8, false);
-  let s3 = new DataView(block16.buffer, block16.byteOffset, 16).getUint32(12, false);
+function aes256EncryptExpanded(w, block16) {
+  const xtime = (x) => ((x << 1) ^ ((x & 0x80) ? 0x1b : 0)) & 0xff;
+  const bv = new DataView(block16.buffer, block16.byteOffset, 16);
+  let s0 = bv.getUint32(0, false);
+  let s1 = bv.getUint32(4, false);
+  let s2 = bv.getUint32(8, false);
+  let s3 = bv.getUint32(12, false);
 
   const addRoundKey = (rk) => {
     s0 ^= w[rk]; s1 ^= w[rk + 1]; s2 ^= w[rk + 2]; s3 ^= w[rk + 3];
@@ -326,7 +278,7 @@ function aes256EncryptBlock(key32, block16) {
     const n = new Uint8Array(16);
     for (let r = 0; r < 4; r++) {
       for (let c = 0; c < 4; c++) {
-        n[r + 4 * c] = SBOX[b[r + 4 * ((c + r) % 4)]];
+        n[r + 4 * c] = AES_SBOX[b[r + 4 * ((c + r) % 4)]];
       }
     }
     const nv = new DataView(n.buffer);
@@ -365,6 +317,58 @@ function aes256EncryptBlock(key32, block16) {
   return out;
 }
 
+// Multiply two 128-bit big-endian GCM elements in GF(2^128) with reduction polynomial x^128 + x^7 + x^2 + x + 1 (0xe1)
+function gf128Mul(xBytes, yBytes) {
+  const x = new Uint8Array(xBytes);
+  const y = new Uint8Array(yBytes);
+  const z = new Uint8Array(16);
+
+  for (let i = 0; i < 16; i++) {
+    for (let bit = 7; bit >= 0; bit--) {
+      if ((y[i] >>> bit) & 1) {
+        for (let k = 0; k < 16; k++) z[k] ^= x[k];
+      }
+      const lsb = x[15] & 1;
+      for (let k = 15; k > 0; k--) {
+        x[k] = ((x[k] >>> 1) | ((x[k - 1] & 1) << 7)) & 0xff;
+      }
+      x[0] = (x[0] >>> 1) & 0xff;
+      if (lsb) {
+        x[0] ^= 0xe1;
+      }
+    }
+  }
+  return z;
+}
+
+function ghashBlocks(hBytes, aadBytes, ctBytes) {
+  let y = new Uint8Array(16);
+
+  const feed = (arr) => {
+    for (let i = 0; i < arr.length; i += 16) {
+      const blk = new Uint8Array(16);
+      blk.set(arr.subarray(i, Math.min(i + 16, arr.length)));
+      for (let k = 0; k < 16; k++) y[k] ^= blk[k];
+      y = gf128Mul(y, hBytes);
+    }
+  };
+
+  feed(aadBytes);
+  feed(ctBytes);
+
+  const lenBlk = new Uint8Array(16);
+  const lv = new DataView(lenBlk.buffer);
+  const aadBits = aadBytes.length * 8;
+  const ctBits = ctBytes.length * 8;
+  lv.setUint32(0, Math.floor(aadBits / 0x100000000), false);
+  lv.setUint32(4, aadBits >>> 0, false);
+  lv.setUint32(8, Math.floor(ctBits / 0x100000000), false);
+  lv.setUint32(12, ctBits >>> 0, false);
+
+  for (let k = 0; k < 16; k++) y[k] ^= lenBlk[k];
+  return gf128Mul(y, hBytes);
+}
+
 function inc32(counter16) {
   const out = new Uint8Array(counter16);
   const dv = new DataView(out.buffer);
@@ -380,25 +384,27 @@ function decryptVidnestPayload(dB64Url, nVal) {
   const ct = raw.subarray(12, raw.length - 16);
 
   const key = sha256Bytes(encodeUtf8(`${nVal}|${VIDNEST_SECRET}`));
-  const H = aes256EncryptBlock(key, new Uint8Array(16));
+  const w = expandAes256Key(key);
+  const H = aes256EncryptExpanded(w, new Uint8Array(16));
 
   const j0 = new Uint8Array(16);
   j0.set(iv, 0);
   j0[15] = 1;
 
-  const expectedTag = aes256EncryptBlock(key, j0);
-  const calcGhash = ghash(H, new Uint8Array(0), ct);
+  const sBlock = ghashBlocks(H, new Uint8Array(0), ct);
+  const eJ0 = aes256EncryptExpanded(w, j0);
+
   let diff = 0;
   for (let i = 0; i < 16; i++) {
-    expectedTag[i] ^= calcGhash[i];
-    diff |= expectedTag[i] ^ tag[i];
+    const expectedByte = (sBlock[i] ^ eJ0[i]) & 0xff;
+    diff |= expectedByte ^ tag[i];
   }
   if (diff !== 0) throw new Error("GCM tag mismatch");
 
   const plain = new Uint8Array(ct.length);
   let ctr = inc32(j0);
   for (let i = 0; i < ct.length; i += 16) {
-    const ks = aes256EncryptBlock(key, ctr);
+    const ks = aes256EncryptExpanded(w, ctr);
     const end = Math.min(i + 16, ct.length);
     for (let j = i; j < end; j++) plain[j] = ct[j] ^ ks[j - i];
     ctr = inc32(ctr);
@@ -565,7 +571,7 @@ function parseEpisodeEmbedMeta(epHtml, fallbackEpNum) {
   let anilistId = null;
   let episodeNum = Number(fallbackEpNum) || 1;
   let subOrDub = "sub";
-  let sourceKind = "hianime"; // "hianime" (HD2) or "animehub" (HD3)
+  let sourceKind = "hianime";
   let bestScore = -1;
 
   const optionRe =
