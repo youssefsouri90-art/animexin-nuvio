@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
   "version": "2.7.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, ani.pm, anime3rb.com, animewitcher.com, koianime.lol) and movies & TV (cinema.army, mapple)",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, ani.pm, anime3rb.com, animewitcher.com, koianime.lol, anichan.to) and movies & TV (cinema.army, mapple)",
   "scrapers": [
     {
       "id": "animexin",
@@ -158,6 +158,27 @@
       "enabled": true,
       "formats": [
         "mp4"
+      ]
+    },
+    {
+      "id": "anichan",
+      "name": "AniChan",
+      "description": "Anime HLS streams from anichan.to (Sub/Dub, fast/rest tiers) with Arabic & multi-language subtitles",
+      "version": "1.0.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/anichan.js",
+      "enabled": true,
+      "formats": [
+        "hls"
+      ],
+      "contentLanguage": [
+        "en",
+        "ja",
+        "ar"
       ]
     }
   ]
