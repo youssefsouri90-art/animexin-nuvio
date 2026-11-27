@@ -1,7 +1,7 @@
 {
   "name": "Animexin Nuvio",
-  "version": "2.7.0",
-  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, ani.pm, anime3rb.com, animewitcher.com, koianime.lol, anichan.to) and movies & TV (cinema.army, mapple)",
+  "version": "2.7.1",
+  "description": "Donghua & anime streams (animexin.dev, donghuaworld.com, anichi.cz, ani.pm, anime3rb.com, animewitcher.com, koianime.lol, anichan.to, witanime.site) and movies & TV (cinema.army, mapple)",
   "scrapers": [
     {
       "id": "animexin",
@@ -177,6 +177,27 @@
       ],
       "contentLanguage": [
         "en",
+        "ja",
+        "ar"
+      ]
+    },
+    {
+      "id": "witanime",
+      "name": "WitAnime",
+      "description": "Anime streams from witanime.site with YonaPlay AES-256-GCM decryption and subtitles",
+      "version": "1.0.0",
+      "author": "you",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/witanime.js",
+      "enabled": true,
+      "formats": [
+        "hls",
+        "mp4"
+      ],
+      "contentLanguage": [
         "ja",
         "ar"
       ]
