@@ -1,20 +1,30 @@
+// AnimoTVSlash provider for Nuvio (QuickJS: no DOM, no Node APIs)
 const BASE_URL = "https://animotvslash.org";
 const VIDNEST_API = "https://promox.vidnest.fun";
 const VIDNEST_SECRET = "K3p8vQ2mX9rL5wZ0fN7bG1sH4tJ6dC9_y8S3wM1nQ5pL2";
+const TMDB_API = "https://api.themoviedb.org/3";
+const TMDB_KEY =
+  (typeof TMDB_API_KEY !== "undefined" && TMDB_API_KEY) ||
+  "4d15cca3b68f75e9a08080dbe6a0568b";
 
-const DEFAULT_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36",
-  "Referer": BASE_URL + "/"
+const UA_STR =
+  "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36";
+
+const SITE_HEADERS = {
+  "User-Agent": UA_STR,
+  Referer: BASE_URL + "/",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 };
 
 const VIDNEST_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36",
-  "Referer": "https://vidnest.fun/",
-  "Origin": "https://vidnest.fun"
+  "User-Agent": UA_STR,
+  Referer: "https://vidnest.fun/",
+  Origin: "https://vidnest.fun",
+  Accept: "application/json,text/plain,*/*",
 };
 
-// --- Fallbacks for QuickJS / environments without globals ---
-const B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const B64_CHARS =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 function fallbackBtoa(binStr) {
   if (typeof btoa === "function") return btoa(binStr);
@@ -29,16 +39,22 @@ function fallbackBtoa(binStr) {
     const e3 = isNaN(c2) ? 64 : ((c2 & 15) << 2) | (isNaN(c3) ? 0 : c3 >> 6);
     const e4 = isNaN(c3) ? 64 : c3 & 63;
 
-    out += B64_CHARS.charAt(e1) + B64_CHARS.charAt(e2) +
-           (e3 === 64 ? "=" : B64_CHARS.charAt(e3)) +
-           (e4 === 64 ? "=" : B64_CHARS.charAt(e4));
+    out +=
+      B64_CHARS.charAt(e1) +
+      B64_CHARS.charAt(e2) +
+      (e3 === 64 ? "=" : B64_CHARS.charAt(e3)) +
+      (e4 === 64 ? "=" : B64_CHARS.charAt(e4));
   }
   return out;
 }
 
 function fallbackAtob(b64Str) {
-  if (typeof atob === "function") return atob(b64Str);
-  const clean = String(b64Str).replace(/[^A-Za-z0-9+/=]/g, "");
+  if (typeof atob === "function") {
+    try {
+      return atob(b64Str);
+    } catch (_) {}
+  }
+  const clean = String(b64Str || "").replace(/[^A-Za-z0-9+/=]/g, "");
   let out = "";
   for (let i = 0; i < clean.length; i += 4) {
     const e1 = B64_CHARS.indexOf(clean.charAt(i));
@@ -48,15 +64,13 @@ function fallbackAtob(b64Str) {
     const e3 = c3 === "=" ? 64 : B64_CHARS.indexOf(c3);
     const e4 = c4 === "=" ? 64 : B64_CHARS.indexOf(c4);
 
-    const chr1 = (e1 << 2) | (e2 >> 4);
-    out += String.fromCharCode(chr1);
-    if (e3 !== 64) {
-      const chr2 = ((e2 & 15) << 4) | (e3 >> 2);
-      out += String.fromCharCode(chr2);
+    if (e1 < 0 || e2 < 0) continue;
+    out += String.fromCharCode((e1 << 2) | (e2 >> 4));
+    if (e3 !== 64 && e3 >= 0) {
+      out += String.fromCharCode(((e2 & 15) << 4) | (e3 >> 2));
     }
-    if (e4 !== 64) {
-      const chr3 = ((e3 & 3) << 6) | e4;
-      out += String.fromCharCode(chr3);
+    if (e4 !== 64 && e4 >= 0) {
+      out += String.fromCharCode(((e3 & 3) << 6) | e4);
     }
   }
   return out;
@@ -66,27 +80,68 @@ function encodeUtf8(str) {
   if (typeof TextEncoder !== "undefined") {
     return new TextEncoder().encode(String(str));
   }
-  const utf8 = unescape(encodeURIComponent(String(str)));
-  const arr = new Uint8Array(utf8.length);
-  for (let i = 0; i < utf8.length; i++) arr[i] = utf8.charCodeAt(i);
-  return arr;
+  const s = String(str);
+  const bytes = [];
+  for (let i = 0; i < s.length; i++) {
+    let code = s.charCodeAt(i);
+    if (code < 0x80) {
+      bytes.push(code);
+    } else if (code < 0x800) {
+      bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < s.length) {
+      const next = s.charCodeAt(++i);
+      const cp = 0x10000 + (((code & 0x3ff) << 10) | (next & 0x3ff));
+      bytes.push(
+        0xf0 | (cp >> 18),
+        0x80 | ((cp >> 12) & 0x3f),
+        0x80 | ((cp >> 6) & 0x3f),
+        0x80 | (cp & 0x3f)
+      );
+    } else {
+      bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+    }
+  }
+  return new Uint8Array(bytes);
 }
 
 function decodeUtf8(bytes) {
   if (typeof TextDecoder !== "undefined") {
-    return new TextDecoder().decode(bytes);
+    try {
+      return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    } catch (_) {}
   }
-  let bin = "";
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  return decodeURIComponent(escape(bin));
+  let out = "";
+  let i = 0;
+  while (i < bytes.length) {
+    const b0 = bytes[i++];
+    if (b0 < 0x80) {
+      out += String.fromCharCode(b0);
+    } else if ((b0 & 0xe0) === 0xc0 && i < bytes.length) {
+      out += String.fromCharCode(((b0 & 0x1f) << 6) | (bytes[i++] & 0x3f));
+    } else if ((b0 & 0xf0) === 0xe0 && i + 1 < bytes.length) {
+      out += String.fromCharCode(
+        ((b0 & 0x0f) << 12) | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f)
+      );
+    } else if ((b0 & 0xf8) === 0xf0 && i + 2 < bytes.length) {
+      const cp =
+        ((b0 & 0x07) << 18) |
+        ((bytes[i++] & 0x3f) << 12) |
+        ((bytes[i++] & 0x3f) << 6) |
+        (bytes[i++] & 0x3f);
+      const u = cp - 0x10000;
+      out += String.fromCharCode(0xd800 | (u >> 10), 0xdc00 | (u & 0x3ff));
+    } else {
+      out += String.fromCharCode(b0);
+    }
+  }
+  return out;
 }
 
 function decodeBase64Html(b64Str) {
-  try {
-    return decodeUtf8(Uint8Array.from(fallbackAtob(String(b64Str).replace(/[^A-Za-z0-9+/=]/g, "")), c => c.charCodeAt(0)));
-  } catch {
-    return fallbackAtob(String(b64Str).replace(/[^A-Za-z0-9+/=]/g, ""));
-  }
+  const raw = fallbackAtob(String(b64Str || "").replace(/[^A-Za-z0-9+/=]/g, ""));
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return decodeUtf8(arr);
 }
 
 function makeVidnestNonce() {
@@ -352,37 +407,187 @@ function decryptVidnestPayload(dB64Url, nVal) {
   return JSON.parse(decodeUtf8(plain));
 }
 
-async function fetchVidnestStream(anilistId, episodeNum, subOrDub = "sub") {
+async function safeText(url, headers) {
+  try {
+    const res = await fetch(url, { headers: headers || SITE_HEADERS });
+    if (!res || !res.ok) return "";
+    return await res.text();
+  } catch (_) {
+    return "";
+  }
+}
+
+async function safeJson(url, headers) {
+  try {
+    const res = await fetch(url, { headers: headers || SITE_HEADERS });
+    if (!res || !res.ok) return null;
+    return await res.json();
+  } catch (_) {
+    return null;
+  }
+}
+
+async function getTmdbTitles(tmdbId, mediaType) {
+  const kind = String(mediaType || "").toLowerCase() === "movie" ? "movie" : "tv";
+  const url = `${TMDB_API}/${kind}/${encodeURIComponent(String(tmdbId))}?api_key=${encodeURIComponent(TMDB_KEY)}&append_to_response=alternative_titles,external_ids`;
+  const data = await safeJson(url, { "User-Agent": UA_STR, Accept: "application/json" });
+  if (!data) return [];
+
+  const titles = [];
+  const pushTitle = (t) => {
+    const clean = String(t || "").trim();
+    if (clean && titles.indexOf(clean) === -1) titles.push(clean);
+  };
+
+  pushTitle(data.title);
+  pushTitle(data.name);
+  pushTitle(data.original_title);
+  pushTitle(data.original_name);
+
+  const altList =
+    (data.alternative_titles && (data.alternative_titles.titles || data.alternative_titles.results)) ||
+    [];
+  for (let i = 0; i < altList.length; i++) {
+    pushTitle(altList[i] && altList[i].title);
+  }
+  return titles;
+}
+
+function normSlug(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+async function findAnimePage(titles) {
+  for (let i = 0; i < titles.length; i++) {
+    const q = titles[i];
+    const slug = normSlug(q);
+    if (slug) {
+      const candidates = [
+        `${BASE_URL}/anime/${slug}/`,
+        `${BASE_URL}/series/${slug}/`,
+      ];
+      for (let c = 0; c < candidates.length; c++) {
+        const html = await safeText(candidates[c], SITE_HEADERS);
+        if (html && /episode|watch|sub|dub|\/anime\/\d+/i.test(html)) {
+          return { url: candidates[c], html };
+        }
+      }
+    }
+
+    const searchUrls = [
+      `${BASE_URL}/?s=${encodeURIComponent(q)}`,
+      `${BASE_URL}/search?q=${encodeURIComponent(q)}`,
+    ];
+    for (let s = 0; s < searchUrls.length; s++) {
+      const sHtml = await safeText(searchUrls[s], SITE_HEADERS);
+      if (!sHtml) continue;
+      const linkRe = /href=["'](https?:\/\/animotvslash\.org\/(?:anime|series)\/[^"'?#]+\/?)["']/gi;
+      let m;
+      while ((m = linkRe.exec(sHtml)) !== null) {
+        const candidateUrl = m[1].endsWith("/") ? m[1] : m[1] + "/";
+        if (/\/episode-/i.test(candidateUrl)) continue;
+        const pageHtml = await safeText(candidateUrl, SITE_HEADERS);
+        if (pageHtml && /episode|sub|dub|\/anime\/\d+/i.test(pageHtml)) {
+          return { url: candidateUrl, html: pageHtml };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function findEpisodeUrl(animeUrl, animeHtml, episodeNum) {
+  const ep = Number(episodeNum) || 1;
+  const patterns = [
+    new RegExp(`href=["'](https?:\\/\\/animotvslash\\.org\\/[^"']*episode-${ep}(?:[^0-9][^"']*)?)["']`, "i"),
+    new RegExp(`href=["'](\\/[^"']*episode-${ep}(?:[^0-9][^"']*)?)["']`, "i"),
+  ];
+  for (let i = 0; i < patterns.length; i++) {
+    const m = patterns[i].exec(animeHtml);
+    if (m && m[1]) {
+      return m[1].startsWith("http") ? m[1] : `${BASE_URL}${m[1].startsWith("/") ? "" : "/"}${m[1]}`;
+    }
+  }
+  const baseNoSlash = animeUrl.replace(/\/+$/, "");
+  return `${baseNoSlash}-episode-${ep}/`;
+}
+
+function parseEpisodeEmbedMeta(epHtml, fallbackEpNum) {
+  let anilistId = null;
+  let episodeNum = Number(fallbackEpNum) || 1;
+  let subOrDub = "sub";
+
+  const optionRe =
+    /<option[^>]*value=["']([A-Za-z0-9+/=]{20,})["'][^>]*>([\s\S]*?)<\/option>/gi;
+  let m;
+  while ((m = optionRe.exec(epHtml)) !== null) {
+    const label = m[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    const decoded = decodeBase64Html(m[1]);
+    const srcMatch = /src=["']([^"'>]+)["']/i.exec(decoded);
+    const src = srcMatch ? srcMatch[1] : decoded;
+
+    const pathMatch = /\/(?:stream\/ani|anime)\/(\d+)\/(\d+)\/(sub|dub)/i.exec(src);
+    if (pathMatch) {
+      anilistId = pathMatch[1];
+      episodeNum = Number(pathMatch[2]) || episodeNum;
+      subOrDub = pathMatch[3].toLowerCase();
+      if (/vidnest/i.test(src) || /softsub/i.test(label)) break;
+    }
+  }
+
+  if (!anilistId) {
+    const anyMatch = /\/(?:stream\/ani|anime)\/(\d+)\/(\d+)\/(sub|dub)/i.exec(epHtml);
+    if (anyMatch) {
+      anilistId = anyMatch[1];
+      episodeNum = Number(anyMatch[2]) || episodeNum;
+      subOrDub = anyMatch[3].toLowerCase();
+    }
+  }
+
+  return { anilistId, episodeNum, subOrDub };
+}
+
+async function fetchVidnestStream(anilistId, episodeNum, subOrDub) {
+  const mode = subOrDub === "dub" ? "dub" : "sub";
   const endpoints = [
-    `${VIDNEST_API}/hianime/anime/${anilistId}/${episodeNum}/${subOrDub}/hd-2`,
-    `${VIDNEST_API}/animehub/${anilistId}/${episodeNum}/${subOrDub}`,
-    `${VIDNEST_API}/aniwave_hls/${anilistId}/${episodeNum}/${subOrDub}`
+    `${VIDNEST_API}/hianime/anime/${anilistId}/${episodeNum}/${mode}/hd-2`,
+    `${VIDNEST_API}/animehub/${anilistId}/${episodeNum}/${mode}`,
+    `${VIDNEST_API}/aniwave_hls/${anilistId}/${episodeNum}/${mode}`,
   ];
 
-  for (const ep of endpoints) {
+  for (let i = 0; i < endpoints.length; i++) {
     try {
-      const url = `${ep}?_n=${encodeURIComponent(makeVidnestNonce())}`;
+      const url = `${endpoints[i]}?_n=${encodeURIComponent(makeVidnestNonce())}`;
       const res = await fetch(url, { headers: VIDNEST_HEADERS });
-      if (!res.ok) continue;
-      const json = await res.json();
-      const data = (json && json.v === 2 && json.d)
-        ? decryptVidnestPayload(json.d, json.n)
-        : json;
+      if (!res || !res.ok) continue;
 
-      const srcList = data?.sources || data?.multiSrc || [];
-      const firstSrc = srcList.find(x => x?.file || x?.url) || srcList[0];
-      const streamUrl = firstSrc?.file || firstSrc?.url;
+      const json = await res.json();
+      const data =
+        json && json.v === 2 && json.d
+          ? decryptVidnestPayload(json.d, json.n)
+          : json;
+
+      const srcList = (data && (data.sources || data.multiSrc)) || [];
+      const firstSrc =
+        srcList.find((x) => x && (x.file || x.url)) || srcList[0];
+      const streamUrl = firstSrc && (firstSrc.file || firstSrc.url);
       if (!streamUrl) continue;
 
-      const rawTracks = data?.tracks || data?.subtitles || [];
+      const rawTracks = (data && (data.tracks || data.subtitles)) || [];
       const subtitles = rawTracks
-        .filter(t => t && t.kind !== "thumbnails")
+        .filter((t) => t && t.kind !== "thumbnails")
         .map((t, idx) => {
-          const fileUrl = String(t?.file || t?.url || "").trim();
+          const fileUrl = String((t && (t.file || t.url)) || "").trim();
           if (!fileUrl || /thumbnails\.vtt/i.test(fileUrl)) return null;
 
-          const rawLabel = String(t?.label || t?.lang || t?.language || `Track ${idx + 1}`).trim();
-          const isArabic = /arabic|\bara\b|\bar\b/i.test(rawLabel) || /\/ara[-_]/i.test(fileUrl);
+          const rawLabel = String(
+            (t && (t.label || t.lang || t.language)) || `Track ${idx + 1}`
+          ).trim();
+          const isArabic =
+            /arabic|\bara\b|\bar\b/i.test(rawLabel) || /\/ara[-_]/i.test(fileUrl);
           const langName = isArabic ? "Arabic" : rawLabel;
 
           return {
@@ -394,7 +599,7 @@ async function fetchVidnestStream(anilistId, episodeNum, subOrDub = "sub") {
             label: langName,
             format: /\.srt(\?|$)/i.test(fileUrl) ? "srt" : "vtt",
             isArabic,
-            default: isArabic
+            default: isArabic,
           };
         })
         .filter(Boolean)
@@ -402,66 +607,63 @@ async function fetchVidnestStream(anilistId, episodeNum, subOrDub = "sub") {
 
       return {
         streamUrl,
-        headers: firstSrc?.referer
-          ? { Referer: firstSrc.referer, "User-Agent": VIDNEST_HEADERS["User-Agent"] }
-          : VIDNEST_HEADERS,
-        subtitles
+        headers:
+          firstSrc && firstSrc.referer
+            ? { Referer: firstSrc.referer, "User-Agent": UA_STR }
+            : VIDNEST_HEADERS,
+        subtitles,
       };
-    } catch {}
+    } catch (_) {}
   }
   return null;
 }
 
-function parseEpisodeEmbedMeta(epHtml, fallbackEpNum = 1) {
-  let anilistId = null;
-  let episodeNum = fallbackEpNum;
-  let subOrDub = "sub";
+async function getStreams(tmdbId, mediaType, season, episode) {
+  try {
+    if (!tmdbId) return [];
+    const epNum = Number(episode) || 1;
+    const titles = await getTmdbTitles(tmdbId, mediaType);
+    if (!titles.length) return [];
 
-  const optionRe = /<option[^>]*value=["']([A-Za-z0-9+/=]{20,})["'][^>]*>([\s\S]*?)<\/option>/gi;
-  let m;
-  while ((m = optionRe.exec(epHtml)) !== null) {
-    const label = m[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-    const decoded = decodeBase64Html(m[1]);
-    const srcMatch = /src=["']([^"'>]+)["']/i.exec(decoded);
-    const src = srcMatch ? srcMatch[1] : decoded;
+    const animePage = await findAnimePage(titles);
+    if (!animePage) return [];
 
-    const pathMatch = /\/(?:stream\/ani|anime)\/(\d+)\/(\d+)\/(sub|dub)/i.exec(src);
-    if (pathMatch) {
-      anilistId = pathMatch[1];
-      episodeNum = pathMatch[2];
-      subOrDub = pathMatch[3].toLowerCase();
-      if (/vidnest/i.test(src) || /softsub/i.test(label)) break;
-    }
+    const epUrl = findEpisodeUrl(animePage.url, animePage.html, epNum);
+    const epHtml = await safeText(epUrl, {
+      "User-Agent": UA_STR,
+      Referer: animePage.url,
+    });
+    if (!epHtml) return [];
+
+    const meta = parseEpisodeEmbedMeta(epHtml, epNum);
+    if (!meta.anilistId) return [];
+
+    const result = await fetchVidnestStream(
+      meta.anilistId,
+      meta.episodeNum,
+      meta.subOrDub
+    );
+    if (!result || !result.streamUrl) return [];
+
+    return [
+      {
+        id: `animotvslash-${meta.anilistId}-${meta.episodeNum}-${meta.subOrDub}`,
+        name: "AnimoTVSlash",
+        title: `AnimoTVSlash (${meta.subOrDub.toUpperCase()})`,
+        url: result.streamUrl,
+        quality: "auto",
+        headers: result.headers,
+        provider: "animotvslash",
+        subtitles: result.subtitles,
+      },
+    ];
+  } catch (_) {
+    return [];
   }
-
-  if (!anilistId) {
-    const anyMatch = /\/(?:stream\/ani|anime)\/(\d+)\/(\d+)\/(sub|dub)/i.exec(epHtml);
-    if (anyMatch) {
-      anilistId = anyMatch[1];
-      episodeNum = anyMatch[2];
-      subOrDub = anyMatch[3].toLowerCase();
-    }
-  }
-
-  return { anilistId, episodeNum, subOrDub };
 }
 
-export async function getStreams(episodeUrl, fallbackEpNum = 1) {
-  const res = await fetch(episodeUrl, { headers: DEFAULT_HEADERS });
-  if (!res.ok) return [];
-  const html = await res.text();
-  const { anilistId, episodeNum, subOrDub } = parseEpisodeEmbedMeta(html, fallbackEpNum);
-  if (!anilistId) return [];
-
-  const result = await fetchVidnestStream(anilistId, episodeNum, subOrDub);
-  if (!result || !result.streamUrl) return [];
-
-  return [{
-    id: `animotvslash-${anilistId}-${episodeNum}-${subOrDub}`,
-    name: "AnimoTVSlash",
-    title: `AnimoTVSlash (${subOrDub.toUpperCase()})`,
-    url: result.streamUrl,
-    headers: result.headers,
-    subtitles: result.subtitles
-  }];
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { getStreams };
+} else if (typeof globalThis !== "undefined") {
+  globalThis.getStreams = getStreams;
 }
